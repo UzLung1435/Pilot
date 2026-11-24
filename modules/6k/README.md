@@ -2,6 +2,8 @@
 
 为相机增加 6K 内录，模块文件为 `pilot_6k.so`。
 
+**适用机型：仅 Sony ILCE-6700 固件 2.00。** 本模块硬编码了 2.00 的录制档位表、GOT 与 CP 地址，导出 `pilot_module_model_a6700`；A7C II 等其它机型的框架会拒绝加载，构建脚本也会拒绝非 `a6700` 的 `PILOT_MODEL`。
+
 [下载 6K v0.1.0](https://github.com/Himpq/Pilot/releases/tag/6k-v0.1.0)
 
 ## 功能

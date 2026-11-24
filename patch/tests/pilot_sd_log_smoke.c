@@ -419,9 +419,9 @@ int main(int argc, char **argv)
 
     dlerror();
     mount_callback_fn on_mount = (mount_callback_fn)dlsym(
-        handle, "pilot_a6700_v1_on_mount");
+        handle, PILOT_ON_MOUNT_SYMBOL);
     const char *error = dlerror();
-    get_api_fn get_api = (get_api_fn)dlsym(handle, "pilot_a6700_get_api");
+    get_api_fn get_api = (get_api_fn)dlsym(handle, PILOT_GET_API_SYMBOL);
     if (error || !on_mount || !get_api) return 11;
 
     char empty_path[512];

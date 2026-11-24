@@ -5,6 +5,7 @@
 | 内容 | 位置 |
 |---|---|
 | 通用 CLI、描述校验、RAM 运行器、合成示例和测试 | 公开仓库 `tools/` |
+| 机型注册表 | 仓库根 `models.json`、`tools/pilot_tool/models.py` |
 | 刷写入口与路径配置代码 | 公开仓库 `patch/on_camera.py`、`on_camera_config.py` |
 | 实机补丁描述、固件镜像、匹配的刷写器、USB transport | 本机外部目录，通过参数指定 |
 | 备份、日志、设备操作记录、生成模块 | 本机输出目录 |
@@ -48,7 +49,7 @@ CP 地址是绝对地址，目前使用 SDK 支持的可写数据区。每项最
 
 ```sh
 python tools/pilot.py modules list --card D:/
-python tools/pilot.py modules deploy private/pilot_example.so --card D:/ --sha256 <模块SHA256> --backup-dir F:/PilotLocal/backups
+python tools/pilot.py modules deploy private/a7c2_example.so --card D:/ --model a7c2 --sha256 <模块SHA256> --backup-dir F:/PilotLocal/backups
 python tools/pilot.py logs --card D:/ --out F:/PilotLocal/logs/session-1
 ```
 
@@ -56,9 +57,12 @@ python tools/pilot.py logs --card D:/ --out F:/PilotLocal/logs/session-1
 更新模块时保留原有加载顺序，再回读模块并原子替换清单。
 日志导出只复制 Pilot 主日志及清单模块对应的 `module.log`。
 
+`--model` 从 `models.json` 取机型，要求模块导出且仅导出 `pilot_module_model_<model>`，并拒绝以其它机型 ID 开头的文件名。
+不带 `--model` 时保持原有行为（不校验机型）；相机端 `pilot_load_modules()` 仍会在 `pilot_module_init` 之前做 `dlsym` 硬校验。
+
 ## 相机刷写入口
 
-`flash` 调用已有 `on_camera.py`；机型由 `--map` 中的 `target` 决定，A6700 2.00 与 A7C II 2.01 共用同一套检查、安装、更新与恢复流程：
+`flash` 调用已有 `on_camera.py`；机型由 `--map` 的 `target` 与 `runtime` 块共同决定，A6700 2.00 与 A7C II 2.01 共用同一套检查、安装、更新与恢复流程，但常驻 DSO 路径、结果头和符号校验按机型不同：
 
 ```sh
 python tools/pilot.py flash check --map F:/PilotLocal/patch.json --transport-root F:/PilotLocal/transport --state-dir F:/PilotLocal/device-state
@@ -66,7 +70,9 @@ python tools/pilot.py flash install --map F:/PilotLocal/patch.json --writer F:/P
 ```
 
 刷写入口使用现有 `pilot.patch-map.v1`，与通用补丁描述 `pilot.patch.v1` 分开。
-`--map` 必须提供匹配固件的完整描述和产物哈希；公开说明用的 `patch.a6700.json` / `patch.a7c2.json` 不含完整安装产物信息。A7C II 另附 `patch.a7c2.image.json` 供离线镜像校验，刷写器结果头可用 `flash.header` 覆盖（默认 `A6700PILOTFLASH\n`）。
+`--map` 必须提供匹配固件的完整描述和产物哈希；公开说明用的 `patch.a6700.json` / `patch.a7c2.json` 不含完整安装产物信息。A7C II 另附 `patch.a7c2.image.json` 供离线镜像校验。
+
+机型相关的 `runtime` 块必须完整复制：它给出 `model_id`、常驻 DSO 路径/文件名、四个引导与模块符号、启动追踪路径和默认结果头（`a7c2` 为 `A7C2PILOTFLASH\n`）。`flash.header` 可覆盖结果头；不带 `runtime` 的旧 A6700 配置仍沿用 `/usr/lib/pilot.so` 与 `A6700PILOTFLASH\n`。刷写前还会扫描常驻 DSO 的导出符号，缺本机型符号或含其它机型 marker 都会拒绝安装。
 USB transport 由本机提供 `cpload_run.py`。帮助、离线校验和 SD 卡操作不加载该依赖。
 真实写入前备份涉及的原文件，设备状态单独写入 `--state-dir/device-state.json`，不改补丁描述。
 
@@ -75,6 +81,7 @@ USB transport 由本机提供 `cpload_run.py`。帮助、离线校验和 SD 卡�
 ```sh
 python tools/sync_public.py --destination /path/to/public-Pilot --write
 python tools/sync_public.py --destination /path/to/public-Pilot
+python tools/pilot_tool/models.py --check
 python -m unittest discover -s tools/tests -p 'test_*.py'
 python -m unittest discover -s patch/tests -p test_on_camera_offline.py
 cc -std=c11 -O2 -Wall -Wextra -Werror -I patch -I tools/runtime tools/runtime/pilot_patch_runtime.c tools/tests/test_runtime.c -o /tmp/pilot-runtime-test

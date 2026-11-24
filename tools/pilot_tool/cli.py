@@ -37,6 +37,7 @@ def parser():
     deploy.add_argument("--card", required=True, type=Path)
     deploy.add_argument("--sha256", required=True)
     deploy.add_argument("--backup-dir", required=True, type=Path)
+    deploy.add_argument("--model", help="required model identity of the module (see models.json)")
     logs = commands.add_parser("logs", help="export Pilot logs from an explicitly selected card")
     logs.add_argument("--card", required=True, type=Path)
     logs.add_argument("--out", required=True, type=Path)
@@ -73,7 +74,11 @@ def main(argv=None):
                     stream.write(source)
                 result = {"source": str(args.out)}
         elif args.command == "modules":
-            result = list_modules(args.card) if args.action == "list" else deploy_module(args.module, args.card, args.sha256, args.backup_dir)
+            if args.action == "list":
+                result = list_modules(args.card)
+            else:
+                result = deploy_module(args.module, args.card, args.sha256,
+                                       args.backup_dir, args.model)
         elif args.command == "logs":
             result = export_logs(args.card, args.out)
         else:

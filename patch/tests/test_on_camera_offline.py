@@ -12,8 +12,11 @@ from pathlib import Path
 
 
 PATCH_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = PATCH_DIR.parent
 sys.path.insert(0, str(PATCH_DIR))
+sys.path.insert(0, str(REPO_ROOT))
 from on_camera_config import add_path_arguments, resolve_paths
+from tools.pilot_tool import models as pilot_models
 
 
 def load_on_camera():
@@ -131,6 +134,61 @@ class OnCameraOfflineTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("--transport-root", result.stdout)
             self.assertFalse(marker.exists())
+
+    def _a7c2_map(self):
+        # Build the map from the registry so this public test does not depend
+        # on research-only files such as patch.a7c2.json.
+        return {"schema": "pilot.patch-map.v1",
+                "runtime": pilot_models.runtime_block("a7c2")}
+
+    def test_model_runtime_switches_device_path_and_writer_header(self):
+        module = load_on_camera()
+        runtime = module.configure_model(self._a7c2_map())
+        self.assertEqual(runtime["model_id"], "a7c2")
+        self.assertEqual(module.PILOT_DEVICE_PATH,
+                         "/tmp/jiritsu/../../usr/lib/pilot_a7c2.so")
+        self.assertEqual(module.PILOT_DSO_DISPLAY_PATH, "/usr/lib/pilot_a7c2.so")
+        self.assertEqual(module.MODEL_FLASH_HEADER, b"A7C2PILOTFLASH\n")
+        module.configure_flash_header(self._a7c2_map())
+        self.assertEqual(module.FLASH_HEADER, b"A7C2PILOTFLASH\n")
+
+        legacy = module.configure_model({"schema": "pilot.patch-map.v1"})
+        self.assertEqual(legacy["model_id"], "a6700")
+        self.assertEqual(module.PILOT_DEVICE_PATH,
+                         "/tmp/jiritsu/../../usr/lib/pilot.so")
+        module.configure_flash_header({})
+        self.assertEqual(module.FLASH_HEADER, b"A6700PILOTFLASH\n")
+
+    def test_legacy_runtime_matches_the_registry(self):
+        module = load_on_camera()
+        self.assertEqual(dict(module.LEGACY_RUNTIME),
+                         pilot_models.runtime_block("a6700"))
+        self.assertEqual(sorted(pilot_models.model_ids()), ["a6700", "a7c2"])
+
+    def test_pilot_dso_model_guard(self):
+        module = load_on_camera()
+        patch_map = self._a7c2_map()
+        good = (b"\x7fELF" + b"\0" * 8 +
+                b"\0".join((b"pilot_a7c2_v1_marker",
+                            b"pilot_a7c2_v1_on_mount",
+                            b"pilot_a7c2_get_api")) + b"\0")
+        module.validate_pilot_dso(good, patch_map)
+        with self.assertRaisesRegex(RuntimeError, "foreign marker"):
+            module.validate_pilot_dso(good + b"pilot_a6700_v1_marker\0",
+                                      patch_map)
+        with self.assertRaisesRegex(RuntimeError, "not a a7c2 build"):
+            module.validate_pilot_dso(b"\x7fELF nothing here\0", patch_map)
+
+    def test_runtime_rejects_mixed_model_identity(self):
+        module = load_on_camera()
+        patch_map = self._a7c2_map()
+        patch_map["runtime"]["marker_symbol"] = "pilot_a6700_v1_marker"
+        with self.assertRaises(RuntimeError):
+            module.resolve_runtime(patch_map)
+        patch_map = self._a7c2_map()
+        del patch_map["runtime"]["foreign_marker_symbols"]
+        with self.assertRaises(RuntimeError):
+            module.resolve_runtime(patch_map)
 
     def test_transport_rejects_module_cached_from_another_root(self):
         module = load_on_camera()

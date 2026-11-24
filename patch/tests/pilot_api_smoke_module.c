@@ -6,6 +6,8 @@
 #include <string.h>
 #include <unistd.h>
 
+PILOT_DECLARE_MODULE_MODEL();
+
 __attribute__((visibility("default")))
 PilotStatus pilot_module_init(const PilotApi *api)
 {

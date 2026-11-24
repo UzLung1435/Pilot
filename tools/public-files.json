@@ -8,6 +8,8 @@
   "tools/pilot_tool/spec.py",
   "tools/pilot_tool/ram.py",
   "tools/pilot_tool/deploy.py",
+  "tools/pilot_tool/models.py",
+  "models.json",
   "tools/runtime/pilot_patch_runtime.c",
   "tools/runtime/pilot_patch_runtime.h",
   "tools/runtime/pilot_sha256.c",

@@ -20,13 +20,21 @@ Pilot 是一个面向索尼相机固件的扩展框架，为模块提供非 Jiri
 
 ## 支持机型
 
-| 机型 | 固件 | 补丁映射 | 状态 |
-|---|---|---|---|
-| Sony ILCE-6700 | 2.00 | `patch.a6700.json` | 实机验证 |
-| Sony ILCE-7CM2（A7C II） | 2.01 | `patch.a7c2.json` | 离线适配完成，实机未验收 |
+| 机型 | 固件 | 补丁映射 | 常驻 DSO / 模块标记 | 状态 |
+|---|---|---|---|---|
+| Sony ILCE-6700 | 2.00 | `patch.a6700.json` | `pilot.so` / `pilot_module_model_a6700` | 实机验证 |
+| Sony ILCE-7CM2（A7C II） | 2.01 | `patch.a7c2.json` | `pilot_a7c2.so` / `pilot_module_model_a7c2` | 离线适配完成，实机未验收 |
 
 A7C II 的固件依据、注入岛重定位、四个补丁窗口与未验项见 [A7C II 适配说明](docs/A7C2-PORT.md)。
 `patch.a7c2.image.json` 是配套的 `pilot.patch.v1` 离线镜像描述。
+
+## 机型隔离
+
+**每个机身有自己的引导产物，不混用。** [`models.json`](models.json) 是机型身份的唯一来源：常驻 DSO 路径与 soname、三个引导导出符号（`pilot_<机型>_v1_marker` / `_v1_on_mount` / `_get_api`）、启动追踪文件、模块标记和刷写器结果头。`patch/pilot_model.h` 是 C 侧的镜像，`tools/pilot_tool/models.py --check` 校验两者一致。
+
+构建时通过 `PILOT_MODEL=a6700|a7c2` 选择机型（默认 `a6700`）；模块必须调用 `PILOT_DECLARE_MODULE_MODEL()` 导出对应标记。刷写前、部署时、运行时各有一次机型校验，装错机型的 DSO 或模块会在加载前被拒绝。A6700 已验证的产物保持原样，A7C II 使用全套 `a7c2` 命名。
+
+6K 与 MenuUI 目前是 ILCE-6700 2.00 专用模块，非 `a6700` 的构建会被脚本拒绝。
 
 ## 特性
 
@@ -53,8 +61,9 @@ A7C II 的固件依据、注入岛重定位、四个补丁窗口与未验项见 
 
 | 路径 | 内容 |
 |---|---|
-| `patch/` | 框架核心、API 和相机刷写入口 |
+| `patch/` | 框架核心、API、机型宏和相机刷写入口 |
 | `patch.*.json` | 各机型启动补丁映射与离线镜像描述 |
+| `models.json` | 机型注册表（身份、符号、路径、岛字符串） |
 | `modules/` | 扩展模块源码及其构建脚本 |
 | `tools/` | 通用补丁、模块部署和日志工具 |
 | `docs/` | 安装使用文档与机型适配说明 |
@@ -63,10 +72,12 @@ A7C II 的固件依据、注入岛重定位、四个补丁窗口与未验项见 
 
 ## 模块
 
-模块导出 `pilot_module_init`，接口定义在 `patch/pilot.h`。
+模块导出 `pilot_module_init`，并用 `PILOT_DECLARE_MODULE_MODEL()` 声明适用的机型；接口定义在 `patch/pilot.h`。框架在调用初始化函数前会用 `dlsym` 核对机型标记。
 
 ```c
 #include "pilot.h"
+
+PILOT_DECLARE_MODULE_MODEL();
 
 PilotStatus pilot_module_init(const PilotApi *api)
 {
@@ -83,11 +94,16 @@ PilotStatus pilot_module_init(const PilotApi *api)
 ## 构建
 
 ```sh
-PILOT_SYSROOT=/path/to/target/sysroot bash patch/build_pilot_dso.sh
-PILOT_SYSROOT=/path/to/target/sysroot bash patch/tests/run_pilot_runtime_smoke.sh
+# A6700（默认）
+PILOT_SYSROOT=/path/to/a6700/sysroot bash patch/build_pilot_dso.sh
+PILOT_SYSROOT=/path/to/a6700/sysroot bash patch/tests/run_pilot_runtime_smoke.sh
+
+# A7C II：产物 build/pilot_a7c2.so，导出 pilot_a7c2_*
+PILOT_MODEL=a7c2 PILOT_SYSROOT=/path/to/a7c2-2.01/sysroot \
+    bash patch/build_pilot_dso.sh
 ```
 
-通过 `PILOT_SYSROOT`、`PILOT_CC` 等环境变量指定 sysroot 与交叉编译器。
+通过 `PILOT_MODEL`、`PILOT_SYSROOT`、`PILOT_CC` 等环境变量指定机型、sysroot 与交叉编译器。模块构建必须用相同的 `PILOT_MODEL`。
 
 ## 许可
 

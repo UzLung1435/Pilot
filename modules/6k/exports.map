@@ -1,4 +1,4 @@
 {
-    global: pilot_module_init;
+    global: pilot_module_init; pilot_module_model_*;
     local: *;
 };

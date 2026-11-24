@@ -2,6 +2,8 @@
 #include <pthread.h>
 #include <stdio.h>
 
+PILOT_DECLARE_MODULE_MODEL();
+
 PilotStatus pilot_6k_encoder_init(const PilotApi *api);
 PilotStatus pilot_6k_buffers_init(const PilotApi *api);
 

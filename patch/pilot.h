@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Every build has one model identity; see patch/pilot_model.h and models.json. */
+#include "pilot_model.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -120,7 +123,17 @@ typedef struct PilotApi {
 
 typedef PilotStatus (*PilotModuleInit)(const PilotApi *api);
 
-const PilotApi *pilot_a6700_get_api(void);
+/* The framework bootstrap exports are model-specific.  A module usually does
+ * not call this directly: pilot_module_init() receives the API table. */
+const PilotApi *PILOT_GET_API_FN(void);
+
+/* Every SD-card module must declare its model tag.  pilot_load_modules()
+ * dlsym()s PILOT_MODULE_MODEL_SYMBOL and refuses a module that was built for
+ * another body (or carries no tag at all), before calling its init function.
+ * Compile the module with the same PILOT_MODEL_* macro as the framework. */
+#define PILOT_DECLARE_MODULE_MODEL() \
+    __attribute__((visibility("default"), used)) \
+    const char PILOT_MODULE_MODEL_FN[] = PILOT_MODEL_ID
 
 #ifdef __cplusplus
 }

@@ -2,6 +2,8 @@
 
 在相机“自定义设置”菜单中增加 Pilot 入口，查看 Pilot 版本、模块列表、启用状态与文件路径。
 
+**适用机型：仅 Sony ILCE-6700 固件 2.00。** 本模块硬编码了 2.00 `appFw.so` 的菜单表与 GOT 偏移，导出 `pilot_module_model_a6700`；其它机型的框架会拒绝加载，构建脚本也会拒绝非 `a6700` 的 `PILOT_MODEL`。
+
 [下载 MenuUI v0.1.0](https://github.com/Himpq/Pilot/releases/tag/menu-ui-v0.1.0)
 
 ![Pilot 菜单界面](assets/menu-preview.png)

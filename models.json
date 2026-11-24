@@ -1,0 +1,56 @@
+{
+  "schema": "pilot.models.v1",
+  "default": "a6700",
+  "description": "One Pilot build targets exactly one camera body. Model-specific symbol names, bootstrap DSO path, island strings and module tags are derived from this registry so a DSO or module built for another body cannot be loaded by mistake.",
+  "island_string_slots": {
+    "0x400": 32,
+    "0x420": 32,
+    "0x440": 32,
+    "0x460": 48,
+    "0x490": 112
+  },
+  "models": {
+    "a6700": {
+      "camera": "Sony ILCE-6700",
+      "firmware": "2.00",
+      "build_macro": "PILOT_MODEL_A6700",
+      "dso_soname": "pilot.so",
+      "dso_path": "/usr/lib/pilot.so",
+      "boot_trace_path": "/tmp_wbshd/pilot-boot.bin",
+      "marker_symbol": "pilot_a6700_v1_marker",
+      "mount_callback_symbol": "pilot_a6700_v1_on_mount",
+      "get_api_symbol": "pilot_a6700_get_api",
+      "module_model_symbol": "pilot_module_model_a6700",
+      "flash_header": "A6700PILOTFLASH\n",
+      "island_strings": {
+        "0x400": "/usr/lib/pilot.so",
+        "0x420": "pilot_a6700_v1_marker",
+        "0x440": "pilot_a6700_v1_on_mount",
+        "0x460": "/tmp_wbshd/pilot-boot.bin",
+        "0x490": "dlerror"
+      },
+      "note": "Existing, camera-verified build. Kept byte-for-byte unchanged: its bootstrap is /usr/lib/pilot.so and its exports already carry the a6700 model name."
+    },
+    "a7c2": {
+      "camera": "Sony ILCE-7CM2 (A7C II)",
+      "firmware": "2.01",
+      "build_macro": "PILOT_MODEL_A7C2",
+      "dso_soname": "pilot_a7c2.so",
+      "dso_path": "/usr/lib/pilot_a7c2.so",
+      "boot_trace_path": "/tmp_wbshd/pilot-a7c2-boot.bin",
+      "marker_symbol": "pilot_a7c2_v1_marker",
+      "mount_callback_symbol": "pilot_a7c2_v1_on_mount",
+      "get_api_symbol": "pilot_a7c2_get_api",
+      "module_model_symbol": "pilot_module_model_a7c2",
+      "flash_header": "A7C2PILOTFLASH\n",
+      "island_strings": {
+        "0x400": "/usr/lib/pilot_a7c2.so",
+        "0x420": "pilot_a7c2_v1_marker",
+        "0x440": "pilot_a7c2_v1_on_mount",
+        "0x460": "/tmp_wbshd/pilot-a7c2-boot.bin",
+        "0x490": "dlerror"
+      },
+      "note": "Ported build. All bootstrap names are a7c2-specific; an a6700 pilot.so or module is rejected before it can be installed or loaded."
+    }
+  }
+}

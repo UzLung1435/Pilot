@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Check, install, restore, or clean a Pilot AP startup patch.
 
-The target model, firmware and patch windows come from the local --map file.
-The same entry point serves A6700 2.00 and A7C II (ILCE-7CM2) 2.01.
+The target model, firmware, patch windows and model identity come from the
+local --map file. One entry point serves every registered body, but the DSO
+path, export names, module tag and writer header are model-specific so a
+wrong-body bootstrap or module is rejected before any write.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -38,20 +41,110 @@ DEFAULT_FLASH_HEADER = b"A6700PILOTFLASH\n"
 FLASH_HEADER = DEFAULT_FLASH_HEADER
 FLASH_POLL_SECONDS = 120
 
+# A map without a "runtime" block is the original, camera-verified A6700 2.00
+# description; keep its exact paths and writer header.  Model-specific maps
+# (for example patch.a7c2.json) carry a complete runtime block generated from
+# models.json, so this utility needs no registry file of its own.
+LEGACY_RUNTIME = {
+    "model_id": "a6700",
+    "camera": "Sony ILCE-6700",
+    "firmware": "2.00",
+    "dso_soname": "pilot.so",
+    "dso_path": "/usr/lib/pilot.so",
+    "boot_trace_path": "/tmp_wbshd/pilot-boot.bin",
+    "marker_symbol": "pilot_a6700_v1_marker",
+    "mount_callback_symbol": "pilot_a6700_v1_on_mount",
+    "get_api_symbol": "pilot_a6700_get_api",
+    "module_model_symbol": "pilot_module_model_a6700",
+    "flash_header": "A6700PILOTFLASH\n",
+    "foreign_model_ids": ["a7c2"],
+    "foreign_marker_symbols": ["pilot_a7c2_v1_marker"],
+}
+RUNTIME_KEYS = frozenset(LEGACY_RUNTIME)
+MODEL_RUNTIME = LEGACY_RUNTIME
+MODEL_FLASH_HEADER = DEFAULT_FLASH_HEADER
+PILOT_DSO_DISPLAY_PATH = LEGACY_RUNTIME["dso_path"]
+PILOT_JIRITSU_PREFIX = "/tmp/jiritsu/../.."
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def nul_strings(data: bytes) -> set[str]:
+    """Printable NUL-terminated strings in an ELF (dynsym names included)."""
+    return {chunk.decode("ascii") for chunk in data.split(b"\0")
+            if 4 <= len(chunk) <= 96 and all(32 <= byte < 127 for byte in chunk)}
+
+
+def resolve_runtime(patch_map: dict) -> dict:
+    """Return the validated model identity carried by the patch map."""
+    runtime = patch_map.get("runtime", LEGACY_RUNTIME)
+    if not isinstance(runtime, dict) or set(runtime) != RUNTIME_KEYS:
+        raise RuntimeError("patch map runtime block is incomplete; copy the full block from the model map")
+    model_id = runtime["model_id"]
+    if not isinstance(model_id, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,15}", model_id):
+        raise RuntimeError("invalid runtime.model_id")
+    dso_path, soname = runtime["dso_path"], runtime["dso_soname"]
+    if not isinstance(dso_path, str) or \
+            not re.fullmatch(r"/usr/lib/[A-Za-z0-9_.-]+\.so", dso_path) or \
+            not isinstance(soname, str) or dso_path.rsplit("/", 1)[1] != soname:
+        raise RuntimeError("invalid runtime.dso_path / dso_soname")
+    for key in ("marker_symbol", "mount_callback_symbol", "get_api_symbol",
+                "module_model_symbol"):
+        symbol = runtime[key]
+        if not isinstance(symbol, str) or \
+                not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", symbol) or \
+                model_id not in symbol:
+            raise RuntimeError(f"runtime.{key} is not a {model_id} symbol")
+    header = runtime["flash_header"]
+    if not isinstance(header, str) or not header.endswith("\n") or len(header) > 32 or \
+            any(ord(char) < 32 and char != "\n" or ord(char) > 126 for char in header):
+        raise RuntimeError("invalid runtime.flash_header")
+    for key in ("foreign_model_ids", "foreign_marker_symbols"):
+        values = runtime[key]
+        if not isinstance(values, list) or any(not isinstance(v, str) or not v for v in values):
+            raise RuntimeError(f"invalid runtime.{key}")
+    return runtime
+
+
+def configure_model(patch_map: dict) -> dict:
+    """Apply the map's model identity to device paths and writer defaults."""
+    global MODEL_RUNTIME, MODEL_FLASH_HEADER, PILOT_DEVICE_PATH, PILOT_DSO_DISPLAY_PATH
+    runtime = resolve_runtime(patch_map)
+    MODEL_RUNTIME = runtime
+    MODEL_FLASH_HEADER = runtime["flash_header"].encode("ascii")
+    PILOT_DSO_DISPLAY_PATH = runtime["dso_path"]
+    PILOT_DEVICE_PATH = PILOT_JIRITSU_PREFIX + runtime["dso_path"]
+    return runtime
+
+
+def validate_pilot_dso(pilot: bytes, patch_map: dict) -> None:
+    """Refuse a DSO built for another body before it reaches the camera."""
+    runtime = resolve_runtime(patch_map)
+    names = nul_strings(pilot)
+    required = (runtime["marker_symbol"], runtime["mount_callback_symbol"],
+                runtime["get_api_symbol"])
+    missing = [symbol for symbol in required if symbol not in names]
+    if missing:
+        raise RuntimeError(
+            f"Pilot DSO is not a {runtime['model_id']} build (missing {', '.join(missing)})")
+    foreign = [symbol for symbol in runtime["foreign_marker_symbols"] if symbol in names]
+    if foreign:
+        raise RuntimeError(
+            f"Pilot DSO exports foreign marker(s) {', '.join(foreign)}; "
+            f"refusing to install it on a {runtime['model_id']} body")
 
 
 def configure_flash_header(patch_map: dict) -> None:
     """Use a model-specific writer result header when --map supplies one.
 
-    A6700 and the stock A7C II writer both use the historical default, so an
-    omitted ``flash.header`` keeps existing installations working unchanged.
+    The model's runtime block sets the default. An explicit ``flash.header``
+    overrides it, and a legacy A6700 map keeps the historical header.
     """
     global FLASH_HEADER
     flash = patch_map.get("flash")
-    header = (flash.get("header", DEFAULT_FLASH_HEADER)
-              if isinstance(flash, dict) else DEFAULT_FLASH_HEADER)
+    header = (flash.get("header", MODEL_FLASH_HEADER)
+              if isinstance(flash, dict) else MODEL_FLASH_HEADER)
     if isinstance(header, str):
         try:
             header = header.encode("ascii")
@@ -151,12 +244,14 @@ def load_writer(patch_map: dict) -> bytes:
 
 
 def load_pilot(patch_map: dict) -> bytes:
+    soname = resolve_runtime(patch_map)["dso_soname"]
     pilot = PILOT_DSO_PATH.read_bytes()
     pilot_meta = patch_map["pilot_dso"]
     if len(pilot) != pilot_meta["size_bytes"] or sha256(pilot) != pilot_meta["sha256"]:
-        raise RuntimeError("pilot.so differs from the DSO recorded in patch.json")
+        raise RuntimeError(f"{soname} differs from the DSO recorded in patch.json")
     if len(pilot) > 65536:
-        raise RuntimeError("pilot.so exceeds the Jiritsu 64 KiB transfer limit")
+        raise RuntimeError(f"{soname} exceeds the Jiritsu 64 KiB transfer limit")
+    validate_pilot_dso(pilot, patch_map)
     return pilot
 
 
@@ -230,7 +325,7 @@ def stage_pilot_dso(session: cr.Session, pilot: bytes,
                     patch_map: dict) -> bool:
     current = session.read_path(PILOT_DEVICE_PATH, missing=True)
     if current is not None and current != pilot:
-        raise RuntimeError("existing /usr/lib/pilot.so differs from this build; inspect before replacing")
+        raise RuntimeError(f"existing {PILOT_DSO_DISPLAY_PATH} differs from this build; inspect before replacing")
     print("persistent bootstrap: " + ("verified" if current == pilot else "will install in /usr/lib"))
     return current != pilot
 
@@ -324,7 +419,7 @@ def run_check(session: cr.Session, patch_map: dict) -> int:
         bootstrap = session.read_path(PILOT_DEVICE_PATH, missing=True)
         expected = patch_map["pilot_dso"]
         if bootstrap is None:
-            print("persistent bootstrap: missing /usr/lib/pilot.so")
+            print(f"persistent bootstrap: missing {PILOT_DSO_DISPLAY_PATH}")
             return 4
         digest = sha256(bootstrap)
         print(f"persistent bootstrap: {len(bootstrap)} bytes sha256={digest}")
@@ -377,7 +472,7 @@ def run_write(session: cr.Session, patch_map: dict, writer: bytes,
 
     if mode == "write":
         if session.read_path(PILOT_DEVICE_PATH, missing=True) != pilot:
-            raise RuntimeError("persistent /usr/lib/pilot.so readback mismatch")
+            raise RuntimeError(f"persistent {PILOT_DSO_DISPLAY_PATH} readback mismatch")
         pilot_state = {
             "schema": "pilot.device-state.v1",
             "last_operation": "install",
@@ -389,7 +484,7 @@ def run_write(session: cr.Session, patch_map: dict, writer: bytes,
             "camera_stage_readback_verified": True,
             "camera_stage_activation": "not_confirmed",
             "camera_candidate_state": "staged_readback_verified_power_cycle_pending",
-            "camera_persistent_path": "/usr/lib/pilot.so",
+            "camera_persistent_path": PILOT_DSO_DISPLAY_PATH,
         }
         save_device_state(pilot_state)
         print(f"persistent bootstrap readback OK: {len(pilot)} bytes sha256={sha256(pilot)}")
@@ -414,7 +509,7 @@ def run_update_pilot(session: cr.Session, patch_map: dict,
     ensure_no_flash_files(session)
     current = session.read_path(PILOT_DEVICE_PATH, missing=True)
     if current == pilot:
-        print(f"persistent /usr/lib/pilot.so already matches: {len(pilot)} bytes sha256={sha256(pilot)}")
+        print(f"persistent {PILOT_DSO_DISPLAY_PATH} already matches: {len(pilot)} bytes sha256={sha256(pilot)}")
         return 0
 
     backup_device_files({"pilot.so": current})
@@ -440,7 +535,7 @@ def run_update_pilot(session: cr.Session, patch_map: dict,
     })
     remove_result_if_matches(session, result)
     print(f"PILOT UPDATE OK: {len(pilot)} bytes sha256={sha256(pilot)}")
-    print("fully power-cycle the camera to load the updated /usr/lib/pilot.so")
+    print(f"fully power-cycle the camera to load the updated {PILOT_DSO_DISPLAY_PATH}")
     return 0
 
 
@@ -450,7 +545,7 @@ def main() -> int:
     group.add_argument("--check", action="store_true", help="read-only full appFw hash check")
     group.add_argument("--install", action="store_true", help="stage Pilot and install the AP patch")
     group.add_argument("--restore", action="store_true", help="restore the four original AP windows")
-    group.add_argument("--update-pilot", action="store_true", help="update /usr/lib/pilot.so in place")
+    group.add_argument("--update-pilot", action="store_true", help="update the model-specific Pilot DSO in place")
     group.add_argument("--clean", action="store_true", help="remove recognized Pilot flash staging files")
     parser.add_argument("--yes", action="store_true", help="required for --install, --restore, and --update-pilot")
     add_path_arguments(parser)
@@ -459,12 +554,16 @@ def main() -> int:
     if (args.install or args.restore or args.update_pilot) and not args.yes:
         parser.error("--install, --restore, and --update-pilot require --yes")
     paths = resolve_paths(args, REPO_ROOT)
+    explicit_pilot = args.pilot is not None
     global MAP_PATH, PILOT_DSO_PATH, FLASH_MODULE_PATH, STATE_DIR
     MAP_PATH = paths.patch_map
     PILOT_DSO_PATH = paths.pilot
     FLASH_MODULE_PATH = paths.writer
     STATE_DIR = paths.state_dir
     patch_map = load_map()
+    runtime = configure_model(patch_map)
+    if not explicit_pilot:
+        PILOT_DSO_PATH = REPO_ROOT / "build" / runtime["dso_soname"]
     configure_flash_header(patch_map)
     writer = None if args.check else load_writer(patch_map)
     pilot = load_pilot(patch_map) if (args.install or args.update_pilot) else b""
@@ -472,6 +571,8 @@ def main() -> int:
     print(f"target: {patch_map['target'].get('model', 'unknown')} "
           f"firmware {patch_map['target'].get('firmware', 'unknown')} "
           "/usr/lib/appFw.so")
+    print(f"model: {runtime['model_id']}  DSO: {runtime['dso_path']}  "
+          f"module tag: {runtime['module_model_symbol']}")
     print(f"baseline sha256: {patch_map['target']['binary_sha256']}")
     print(f"patched sha256: {patch_map['target']['patched_binary_sha256']}")
     if writer is not None:

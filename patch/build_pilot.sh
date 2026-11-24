@@ -6,12 +6,26 @@ PATCH_DIR="$ROOT/patch"
 BUILD_DIR="$ROOT/build"
 SYSROOT="${PILOT_SYSROOT:?set PILOT_SYSROOT to a target sysroot}"
 CC="${AARCH64_CC:-aarch64-linux-gnu-gcc-11}"
+PYTHON="${PILOT_PYTHON:-python3}"
+MODEL="${PILOT_MODEL:-a6700}"
+MODELS="$ROOT/tools/pilot_tool/models.py"
 OUT="${1:-$BUILD_DIR/pilot_modular_candidate.so}"
+
+# models.json is the single source of truth; --check also verifies that
+# patch/pilot_model.h has not drifted from the registry.
+"$PYTHON" "$MODELS" --check >/dev/null
+model_value() { "$PYTHON" "$MODELS" "$MODEL" "$1"; }
+BUILD_MACRO="$(model_value build_macro)"
+SONAME="$(model_value dso_soname)"
+MARKER_SYMBOL="$(model_value marker_symbol)"
+ON_MOUNT_SYMBOL="$(model_value mount_callback_symbol)"
+GET_API_SYMBOL="$(model_value get_api_symbol)"
 
 mkdir -p "$(dirname "$OUT")"
 "$CC" -std=c11 -O2 -march=armv8-a -mno-outline-atomics \
     -fno-stack-protector -fPIC -fvisibility=hidden -Wall -Wextra -Werror \
-    -shared -nostdlib -Wl,-soname,pilot.so -Wl,--no-undefined \
+    -D"$BUILD_MACRO" \
+    -shared -nostdlib -Wl,-soname,"$SONAME" -Wl,--no-undefined \
     -Wl,--no-as-needed -Wl,--build-id=none -L"$SYSROOT/lib" \
     -I "$PATCH_DIR" -o "$OUT" \
     "$PATCH_DIR/pilot_entry.c" \
@@ -34,10 +48,18 @@ if grep -q '(TEXTREL)' <<<"$ELF_DYNAMIC"; then
     echo "text relocation found in Pilot DSO" >&2
     exit 1
 fi
-# pilot_a6700_* are the historical cross-model ABI names; the A6700 and A7C II
-# builds both export them so the same island string table works on both bodies.
-for symbol in pilot_a6700_v1_on_mount pilot_a6700_v1_marker pilot_a6700_get_api; do
-    grep -q "$symbol" <<<"$ELF_SYMBOLS"
+# Bootstrap exports are model-specific: require this body's three symbols and
+# reject another body's marker, so a wrong-model DSO cannot pass a build check.
+for symbol in "$ON_MOUNT_SYMBOL" "$MARKER_SYMBOL" "$GET_API_SYMBOL"; do
+    grep -qF "$symbol" <<<"$ELF_SYMBOLS"
 done
+for other in $("$PYTHON" "$MODELS" --ids); do
+    if [ "$other" = "$MODEL" ]; then continue; fi
+    if grep -qF "pilot_${other}_v1_marker" <<<"$ELF_SYMBOLS"; then
+        echo "Pilot DSO built for $MODEL exports a marker belonging to $other" >&2
+        exit 1
+    fi
+done
+echo "Pilot model=$MODEL soname=$SONAME"
 sha256sum "$OUT"
 stat -c '%n %s bytes' "$OUT"

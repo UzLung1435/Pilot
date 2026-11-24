@@ -24,8 +24,9 @@ struct pilot_card_log_job {
     pilot_write_file_fn write_file;
 };
 
-/* struct pilot_mount_args is Pilot's own internal ABI: the bootstrap island
- * only dlopen()s this DSO, so the layout is shared by A6700 and A7C II. */
+/* struct pilot_mount_args is Pilot's own internal ABI.  The bootstrap island
+ * only dlopen()s PILOT_DSO_PATH, so the layout is shared by both bodies while
+ * the DSO name and exports are model-specific. */
 _Static_assert(offsetof(struct pilot_mount_args, mount_flags) == 8,
                "Pilot mount argument layout changed");
 
@@ -41,8 +42,11 @@ struct pilot_runtime g_pilot = {
     .log_lock = PTHREAD_MUTEX_INITIALIZER,
 };
 
+/* The island looks this symbol up with dlsym(RTLD_DEFAULT, ...) as a
+ * "bootstrap already loaded" guard.  Its name is model-specific, so an
+ * a6700 DSO can never satisfy an a7c2 island (or vice versa). */
 __attribute__((visibility("default"), used))
-const unsigned int pilot_a6700_v1_marker = 0x50494c31u;
+const unsigned int PILOT_MARKER_FN = 0x50494c31u;
 
 static void pilot_runtime_log(const char *message)
 {
@@ -214,7 +218,7 @@ static void *pilot_card_log_worker(void *opaque)
 }
 
 __attribute__((visibility("default"), used))
-void pilot_a6700_v1_on_mount(
+void PILOT_ON_MOUNT_FN(
     const struct pilot_mount_args *mount_args,
     pilot_get_drive_letter_fn get_drive_letter,
     pilot_mkdir_fn mkdir_path,
@@ -339,7 +343,7 @@ static void pilot_constructor(void)
     if (atomic_flag_test_and_set_explicit(&pilot_started, memory_order_acq_rel))
         return;
 
-    pilot_runtime_log("pilot.so constructor entered\n");
+    pilot_runtime_log("Pilot " PILOT_MODEL_ID " DSO constructor entered\n");
 
     pthread_t thread;
     int result = pthread_create(&thread, 0, pilot_worker, 0);

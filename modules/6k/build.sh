@@ -5,6 +5,14 @@ MOD="$ROOT/modules/6k"
 SYSROOT=${PILOT_A6700_SYSROOT:?set PILOT_A6700_SYSROOT to a target sysroot}
 CC=${AARCH64_CC:-aarch64-linux-gnu-gcc-11}
 OUT=${1:-$ROOT/build/pilot_6k.so}
+# The 6K tables, GOT entries and CP addresses are ILCE-6700 2.00-specific.
+# Refuse any other body instead of silently shipping a wrong-model module.
+MODEL=${PILOT_MODEL:-a6700}
+if [ "$MODEL" != "a6700" ]; then
+    echo "6K module is ILCE-6700 2.00 only; refusing PILOT_MODEL=$MODEL" >&2
+    exit 2
+fi
+MODEL_MACRO=PILOT_MODEL_A6700
 TMP=$(mktemp -d /tmp/pilot-6k-build.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -30,12 +38,14 @@ for name,key in [('encoder.so','encoder_binary_sha256'),('buffers.so','buffers_b
 print('BASELINES_REPRODUCED encoder=fe5609fd buffers=cfeac73b')
 PY
 
-"$CC" "${COMMON[@]}" "${ENCODER[@]}" -Dpilot_module_init=pilot_6k_encoder_init -c "$MOD/pilot_hs6k30_all_v1.c" -o "$TMP/encoder.o"
-"$CC" "${COMMON[@]}" -Dpilot_module_init=pilot_6k_buffers_init -c "$MOD/pilot_cp_6k_og.c" -o "$TMP/buffers.o"
-"$CC" "${COMMON[@]}" -c "$MOD/pilot_6k.c" -o "$TMP/entry.o"
+"$CC" "${COMMON[@]}" "${ENCODER[@]}" -D"$MODEL_MACRO" -Dpilot_module_init=pilot_6k_encoder_init -c "$MOD/pilot_hs6k30_all_v1.c" -o "$TMP/encoder.o"
+"$CC" "${COMMON[@]}" -D"$MODEL_MACRO" -Dpilot_module_init=pilot_6k_buffers_init -c "$MOD/pilot_cp_6k_og.c" -o "$TMP/buffers.o"
+"$CC" "${COMMON[@]}" -D"$MODEL_MACRO" -c "$MOD/pilot_6k.c" -o "$TMP/entry.o"
 mkdir -p "$(dirname "$OUT")"
 "$CC" "${LINK[@]}" -Wl,-soname,pilot_6k.so -Wl,--version-script="$MOD/exports.map" -o "$OUT" "$TMP/entry.o" "$TMP/encoder.o" "$TMP/buffers.o" "${LIBS[@]}"
 readelf -h "$OUT" | grep -q AArch64
 if readelf -d "$OUT" | grep -q TEXTREL; then exit 1; fi
+# The exported model tag is what lets pilot_load_modules() reject a wrong body.
+readelf -sW "$OUT" | grep -q 'pilot_module_model_a6700'
 sha256sum "$OUT"
 stat -c 'size_bytes=%s' "$OUT"

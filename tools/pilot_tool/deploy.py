@@ -12,8 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .models import model_ids, module_model_symbol
+
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}\.so$")
 _LOGS = ("log.txt",)
+_MODEL_TAG = re.compile(rb"pilot_module_model_([a-z][a-z0-9_]{0,15})\x00")
 
 
 def _no_symlink(path: Path, *, allow_missing: bool = False) -> None:
@@ -70,7 +73,31 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_elf(module: Path, expected_sha256: str) -> str:
+def _check_module_model(data: bytes, name: str, model: str | None) -> str | None:
+    """Reject a module whose exported model tag (or filename) is for another body.
+
+    The tag lives in .dynstr, so a NUL-terminated scan also works on stripped
+    modules without section headers.  The camera-side framework performs the
+    authoritative check with dlsym() before pilot_module_init().
+    """
+    if model is None:
+        return None
+    known = model_ids()
+    if model not in known:
+        raise ValueError(f"unknown model {model!r}; registered: {', '.join(known)}")
+    expected = module_model_symbol(model)
+    found = {"pilot_module_model_" + match.group(1).decode("ascii")
+             for match in _MODEL_TAG.finditer(data)}
+    if found != {expected}:
+        raise ValueError(f"module {name} is not built for {model}: expected tag "
+                         f"{expected}, found {', '.join(sorted(found)) or 'none'}")
+    for other in known:
+        if other != model and re.match(rf"^{re.escape(other)}[_-]", name, re.IGNORECASE):
+            raise ValueError(f"module filename {name} is tagged for {other}, not {model}")
+    return expected
+
+
+def _validate_elf(module: Path, expected_sha256: str, model: str | None = None) -> tuple[str, str | None]:
     if module.suffix != ".so" or not _module_name(module.name):
         raise ValueError("module filename must be a valid .so name")
     _no_symlink(module)
@@ -78,17 +105,17 @@ def _validate_elf(module: Path, expected_sha256: str) -> str:
         raise ValueError("module must be a regular file")
     if not 64 <= module.stat().st_size <= 2 * 1024 * 1024:
         raise ValueError("module size must be 64 bytes..2 MiB")
-    digest = _sha256(module)
+    data = module.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
     if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256) or digest.lower() != expected_sha256.lower():
         raise ValueError("module SHA-256 does not match expected_sha256")
-    with module.open("rb") as stream:
-        header = stream.read(20)
+    header = data[:20]
     if len(header) < 20 or header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01":
         raise ValueError("module must be an ELF64 file")
     byteorder = "little" if header[5] == 1 else "big"
     if int.from_bytes(header[18:20], byteorder) != 183:
         raise ValueError("module ELF machine must be AArch64")
-    return digest
+    return digest, _check_module_model(data, module.name, model)
 
 
 def _backup_dir(base: Path, card: Path) -> Path:
@@ -110,10 +137,15 @@ def _backup_dir(base: Path, card: Path) -> Path:
     raise FileExistsError("could not allocate a unique backup directory")
 
 
-def deploy_module(module: Path, card: Path, expected_sha256: str, backup_dir: Path) -> dict[str, Any]:
-    """Validate, back up and install one public module on an explicitly named card root."""
+def deploy_module(module: Path, card: Path, expected_sha256: str,
+                  backup_dir: Path, model: str | None = None) -> dict[str, Any]:
+    """Validate, back up and install one public module on an explicitly named card root.
+
+    Pass ``model`` to enforce the body identity: the module must export exactly
+    that model's tag and must not be named after a different registered body.
+    """
     module, card, backup_dir = Path(module), Path(card), Path(backup_dir)
-    digest = _validate_elf(module, expected_sha256)
+    digest, model_tag = _validate_elf(module, expected_sha256, model)
     if not card.is_absolute():
         raise ValueError("card root must be an explicit absolute path")
     _no_symlink(card)
@@ -168,7 +200,8 @@ def deploy_module(module: Path, card: Path, expected_sha256: str, backup_dir: Pa
     finally:
         if temp_module.exists():
             temp_module.unlink()
-    return {"sha256": digest, "backup_dir": str(backup), "modules": merged}
+    return {"sha256": digest, "backup_dir": str(backup), "modules": merged,
+            "model": model, "model_tag": model_tag}
 
 
 def list_modules(card: Path) -> list[dict[str, str]]:

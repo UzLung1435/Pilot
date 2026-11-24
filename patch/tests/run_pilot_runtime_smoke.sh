@@ -31,13 +31,19 @@ pilot_cleanup() {
 }
 trap pilot_cleanup EXIT
 
+# This smoke test exercises the ILCE-6700 build only.  The model macro must
+# match the DSO under test so the harness dlsym()s the right export names.
+pilot_model_macro=PILOT_MODEL_A6700
+
 "$pilot_cc" --sysroot="$pilot_sysroot" -std=c11 -O2 -march=armv8-a \
     -mno-outline-atomics -fno-stack-protector -fPIC -fvisibility=hidden \
+    -D"$pilot_model_macro" \
     -shared -nostdlib -Wl,-soname,a6700_pilot_api_smoke.so \
     -Wl,--no-undefined -Wl,--no-as-needed -L"$pilot_sysroot/lib" \
     -o "$pilot_test_root/a6700_pilot_api_smoke.so" \
     "$pilot_root/patch/tests/pilot_api_smoke_module.c" \
     -l:libc.so.6 -static-libgcc
+readelf -sW "$pilot_test_root/a6700_pilot_api_smoke.so" | grep -q 'pilot_module_model_a6700'
 
 "$pilot_cc" --sysroot="$pilot_sysroot" -std=c11 -O2 -march=armv8-a \
     -mno-outline-atomics -fno-stack-protector \

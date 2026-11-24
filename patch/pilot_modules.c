@@ -128,9 +128,45 @@ static int valid_filename(const char *name)
 
 static void module_log(const char *message)
 {
-    const PilotApi *api = pilot_a6700_get_api();
+    const PilotApi *api = PILOT_GET_API_FN();
     if (api && api->log && api->log->print)
         (void)api->log->print(message);
+}
+
+static const char *const pilot_known_model_ids[] = PILOT_MODEL_IDS;
+
+/* A module must export exactly this body's tag.  Check for foreign tags too
+ * so the log names the body the module was actually built for.  This runs
+ * before pilot_module_init(), so a wrong-body module never touches the appFw
+ * or CP memory APIs. */
+static int module_model_matches(void *handle, char *found_out,
+                                size_t found_capacity)
+{
+    if (dlsym(handle, PILOT_MODULE_MODEL_SYMBOL)) return 1;
+    if (found_out && found_capacity) found_out[0] = '\0';
+    for (size_t i = 0; pilot_known_model_ids[i]; ++i) {
+        const char *model_id = pilot_known_model_ids[i];
+        if (strcmp(model_id, PILOT_MODEL_ID) == 0) continue;
+        char candidate[64];
+        int length = snprintf(candidate, sizeof(candidate), "%s%s",
+                              PILOT_MODULE_MODEL_PREFIX, model_id);
+        if (length <= 0 || (size_t)length >= sizeof(candidate)) continue;
+        if (dlsym(handle, candidate)) {
+            if (found_out)
+                snprintf(found_out, found_capacity, "%s", model_id);
+            return 0;
+        }
+    }
+    if (found_out) snprintf(found_out, found_capacity, "%s", "none");
+    return 0;
+}
+
+/* dlopen()ed libraries stay resident; keep the handle so nothing is unloaded
+ * on a failed traversal, but never write past the fixed handle table. */
+static void retain_module_handle(void *handle)
+{
+    if (g_pilot.module_count < PILOT_MODULE_MAX_COUNT)
+        g_pilot.module_handles[g_pilot.module_count++] = handle;
 }
 
 /* Per-module lines must carry the manifest name: the main log has no other
@@ -427,6 +463,18 @@ void pilot_load_modules(void)
             break;
         }
 
+        char found_model[24];
+        if (!module_model_matches(handle, found_model, sizeof(found_model))) {
+            module_log_named(names[i],
+                             "Pilot module model mismatch expected=%s found=%s tag=%s; remaining modules skipped",
+                             PILOT_MODEL_ID, found_model,
+                             PILOT_MODULE_MODEL_SYMBOL);
+            __atomic_store_n(&g_pilot.optional_features_enabled, 0, __ATOMIC_RELEASE);
+            retain_module_handle(handle);
+            traversal_complete = 0;
+            break;
+        }
+
         void *symbol = dlsym(handle, PILOT_MODULE_INIT_SYMBOL);
         PilotModuleInit init = 0;
         if (symbol && sizeof(init) == sizeof(symbol))
@@ -434,7 +482,7 @@ void pilot_load_modules(void)
         if (!init) {
             module_log_named(names[i], "Pilot module init symbol missing; remaining modules skipped");
             __atomic_store_n(&g_pilot.optional_features_enabled, 0, __ATOMIC_RELEASE);
-            g_pilot.module_handles[g_pilot.module_count++] = handle;
+            retain_module_handle(handle);
             traversal_complete = 0;
             break;
         }
@@ -448,7 +496,7 @@ void pilot_load_modules(void)
             module_log_named(names[i], "Pilot module API binding failed status=%d",
                              (int)api_status);
             __atomic_store_n(&g_pilot.optional_features_enabled, 0, __ATOMIC_RELEASE);
-            g_pilot.module_handles[g_pilot.module_count++] = handle;
+            retain_module_handle(handle);
             traversal_complete = 0;
             break;
         }
@@ -472,13 +520,13 @@ void pilot_load_modules(void)
             module_log_named(names[i], "Pilot module initialization failed status=%d; remaining modules skipped",
                              (int)init_status);
             __atomic_store_n(&g_pilot.optional_features_enabled, 0, __ATOMIC_RELEASE);
-            g_pilot.module_handles[g_pilot.module_count++] = handle;
+            retain_module_handle(handle);
             traversal_complete = 0;
             break;
         }
 
         if (g_pilot.module_count < PILOT_MODULE_MAX_COUNT)
-            g_pilot.module_handles[g_pilot.module_count++] = handle;
+            retain_module_handle(handle);
         else {
             module_log_named(names[i], "Pilot module limit reached; remaining modules skipped");
             __atomic_store_n(&g_pilot.optional_features_enabled, 0, __ATOMIC_RELEASE);

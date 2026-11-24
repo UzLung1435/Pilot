@@ -84,6 +84,32 @@ class DeployTests(unittest.TestCase):
         self.assertEqual((backup / "demo.so").read_bytes(), b"old module")
         self.assertEqual(json.loads(manifest.read_text(encoding="utf-8")), {"modules": ["old.so", "demo.so"]})
 
+    def test_model_guard_accepts_matching_tag(self):
+        self.source.write_bytes(elf64_aarch64(b"pilot_module_model_a7c2\x00"))
+        result = deploy_module(self.source, self.card, self.digest(),
+                               self.backups, model="a7c2")
+        self.assertEqual(result["model"], "a7c2")
+        self.assertEqual(result["model_tag"], "pilot_module_model_a7c2")
+        self.assertTrue((self.card / "pilot" / "demo.so").is_file())
+
+    def test_model_guard_rejects_foreign_or_missing_tag(self):
+        for payload in (b"pilot_module_model_a6700\x00", b"plain module"):
+            self.source.write_bytes(elf64_aarch64(payload))
+            with self.assertRaisesRegex(ValueError, "not built for a7c2"):
+                deploy_module(self.source, self.card, self.digest(),
+                              self.backups, model="a7c2")
+        self.assertFalse((self.card / "pilot").exists())
+
+    def test_model_guard_rejects_foreign_filename_and_unknown_model(self):
+        foreign = self.root / "a6700_demo.so"
+        foreign.write_bytes(elf64_aarch64(b"pilot_module_model_a7c2\x00"))
+        with self.assertRaisesRegex(ValueError, "tagged for a6700"):
+            deploy_module(foreign, self.card, self.digest(foreign),
+                          self.backups, model="a7c2")
+        with self.assertRaisesRegex(ValueError, "unknown model"):
+            deploy_module(self.source, self.card, self.digest(),
+                          self.backups, model="unknown-body")
+
     def test_export_rejects_symlink_without_reading_target(self):
         pilot = self.card / "pilot"
         module_dir = pilot / "modules" / "demo"

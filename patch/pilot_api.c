@@ -153,7 +153,7 @@ PilotStatus pilot_api_for_module(const char *module_name,
 }
 
 __attribute__((visibility("default"), used))
-const PilotApi *pilot_a6700_get_api(void)
+const PilotApi *PILOT_GET_API_FN(void)
 {
     g_api.feature_flags = api_base_features();
     return &g_api;

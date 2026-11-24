@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <string.h>
 
+PILOT_DECLARE_MODULE_MODEL();
+
 #define PILOT_MENU_TITLE_DEFAULT "Pilot"
 #define PILOT_UI_VERSION_STRING "Pilot v0.1.1"
 #define PILOT_UI_DESC_STRING \
