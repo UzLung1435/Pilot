@@ -1,5 +1,13 @@
 # 更新记录
 
+## 未发布（A7C II 2.01 适配）
+
+- 新增 `patch.a7c2.json` 与 `patch.a7c2.image.json`：ILCE-7CM2 2.01 的 DT_INIT 启动钩子映射与离线镜像描述。
+- 注入岛按 A7C II 的 `DT_INIT 0x165cfb8`、`dlsym/dlopen` PLT 与 `PT_LOAD[0]` 段尾空隙重定位，四个补丁窗口与原厂基线逐字节校验。
+- `on_camera.py` 的机型文案改为中立，并支持 `flash.header` 由 `--map` 覆盖；默认结果头不变。
+- 构建脚本与 `pilot_entry.c` 明确 `pilot_a6700_*` 是跨机型 ABI 名；新增 [A7C II 适配说明](docs/A7C2-PORT.md)。
+- 离线验收：`pilot.py inspect/image/--restore` 往返通过、结果镜像重新反汇编通过；实机刷写与加载未验收。
+
 ## v0.1.1（2026-11-22）
 
 - 每次启动的 SD 日志首行前增加空行。

@@ -1,6 +1,6 @@
 # 使用方式
 
-框架发布下载：[Releases](https://github.com/Himpq/Pilot/releases)。适用 Sony ILCE-6700 固件 2.00，模块 ABI 为 2。电脑端工具需要 Python 3.10 或更新版本。
+框架发布下载：[Releases](https://github.com/Himpq/Pilot/releases)。适用 Sony ILCE-6700 固件 2.00，以及 Sony ILCE-7CM2（A7C II）固件 2.01（离线适配完成，实机未验收）；模块 ABI 为 2。电脑端工具需要 Python 3.10 或更新版本。
 
 ## 1. 准备文件
 
@@ -22,8 +22,10 @@ python tools/pilot.py --help
 | USB transport 目录 | `cpload_run.py` 及其所需的本机 USB 环境 |
 | 本机状态目录 | 存放原文件备份和设备操作记录 |
 
-上述材料保留在本机，通过命令参数指定。`patch.a6700.json` 是结构说明；安装使用包含目标哈希、框架及刷写器哈希的完整配置。
+上述材料保留在本机，通过命令参数指定。`patch.a6700.json` 与 `patch.a7c2.json` 是结构说明；安装使用包含目标哈希、框架及刷写器哈希的完整配置。
 更新框架版本时，配置和刷写器也要与新的 `pilot.so` 一起匹配。
+
+A7C II 2.01 还需准备：`patch.a7c2.image.json`（`pilot.patch.v1` 离线镜像描述，可用 `pilot.py image` 生成和恢复补丁镜像）、按 A7C II 四个窗口重建的 `pilot_ap_flash.so`、以及指向 A7C II 2.01 sysroot 构建的 `pilot.so`。完整依据与 `patch.json` 模板见 [A7C II 适配说明](A7C2-PORT.md)。刷写器若使用自定义结果头，可在 `patch.json` 中设置 `flash.header`；默认沿用 `A6700PILOTFLASH\n`。
 
 ## 2. 检查与升级常驻框架
 

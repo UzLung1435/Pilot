@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Check, install, restore, or clean the Pilot A6700 AP startup patch."""
+"""Check, install, restore, or clean a Pilot AP startup patch.
+
+The target model, firmware and patch windows come from the local --map file.
+The same entry point serves A6700 2.00 and A7C II (ILCE-7CM2) 2.01.
+"""
 
 from __future__ import annotations
 
@@ -30,11 +34,33 @@ FLASH_FILES = {
     "mode": "/tmp/jiritsu/pilotflash.mode",
     "result": "/tmp/jiritsu/pilotflash.result",
 }
-FLASH_HEADER = b"A6700PILOTFLASH\n"
+DEFAULT_FLASH_HEADER = b"A6700PILOTFLASH\n"
+FLASH_HEADER = DEFAULT_FLASH_HEADER
 FLASH_POLL_SECONDS = 120
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def configure_flash_header(patch_map: dict) -> None:
+    """Use a model-specific writer result header when --map supplies one.
+
+    A6700 and the stock A7C II writer both use the historical default, so an
+    omitted ``flash.header`` keeps existing installations working unchanged.
+    """
+    global FLASH_HEADER
+    flash = patch_map.get("flash")
+    header = (flash.get("header", DEFAULT_FLASH_HEADER)
+              if isinstance(flash, dict) else DEFAULT_FLASH_HEADER)
+    if isinstance(header, str):
+        try:
+            header = header.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise RuntimeError("flash.header must be ASCII") from error
+    if (not isinstance(header, bytes) or not header or len(header) > 32 or
+            b"\n" not in header):
+        raise RuntimeError("flash.header must be a short ASCII line (<=32 bytes)")
+    FLASH_HEADER = header
 
 
 def load_map() -> dict:
@@ -439,6 +465,7 @@ def main() -> int:
     FLASH_MODULE_PATH = paths.writer
     STATE_DIR = paths.state_dir
     patch_map = load_map()
+    configure_flash_header(patch_map)
     writer = None if args.check else load_writer(patch_map)
     pilot = load_pilot(patch_map) if (args.install or args.update_pilot) else b""
 

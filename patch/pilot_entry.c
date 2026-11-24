@@ -24,8 +24,10 @@ struct pilot_card_log_job {
     pilot_write_file_fn write_file;
 };
 
+/* struct pilot_mount_args is Pilot's own internal ABI: the bootstrap island
+ * only dlopen()s this DSO, so the layout is shared by A6700 and A7C II. */
 _Static_assert(offsetof(struct pilot_mount_args, mount_flags) == 8,
-               "A6700 mount argument layout changed");
+               "Pilot mount argument layout changed");
 
 static atomic_flag pilot_started = ATOMIC_FLAG_INIT;
 static unsigned int card_worker_state[52];

@@ -103,6 +103,17 @@ class OnCameraOfflineTests(unittest.TestCase):
             self.assertEqual(json.loads(state_text)["camera_applied"], True)
         self.assertEqual(json.dumps(patch_map, ensure_ascii=False, sort_keys=True), before)
 
+    def test_flash_header_follows_the_selected_model_map(self):
+        module = load_on_camera()
+        self.assertEqual(module.FLASH_HEADER, b"A6700PILOTFLASH\n")
+        module.configure_flash_header({"flash": {"header": "A7C2PILOTFLASH\n"}})
+        self.assertEqual(module.FLASH_HEADER, b"A7C2PILOTFLASH\n")
+        module.configure_flash_header({"schema": "pilot.patch-map.v1"})
+        self.assertEqual(module.FLASH_HEADER, b"A6700PILOTFLASH\n")
+        with self.assertRaises(RuntimeError):
+            module.configure_flash_header({"flash": {"header": "x" * 64}})
+        module.FLASH_HEADER = b"A6700PILOTFLASH\n"
+
     def test_help_does_not_import_transport_dependency(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

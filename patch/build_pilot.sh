@@ -34,6 +34,8 @@ if grep -q '(TEXTREL)' <<<"$ELF_DYNAMIC"; then
     echo "text relocation found in Pilot DSO" >&2
     exit 1
 fi
+# pilot_a6700_* are the historical cross-model ABI names; the A6700 and A7C II
+# builds both export them so the same island string table works on both bodies.
 for symbol in pilot_a6700_v1_on_mount pilot_a6700_v1_marker pilot_a6700_get_api; do
     grep -q "$symbol" <<<"$ELF_SYMBOLS"
 done

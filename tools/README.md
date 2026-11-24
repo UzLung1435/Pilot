@@ -17,6 +17,10 @@
 python tools/pilot.py inspect tools/examples/file.synthetic.json
 python tools/pilot.py image private/patch.json private/appFw.before.so --out private/appFw.after.so
 python tools/pilot.py image private/patch.json private/appFw.after.so --restore --out private/appFw.restored.so
+
+# A7C II 2.01 的现成描述（原厂镜像由本机提供）
+python tools/pilot.py inspect patch.a7c2.image.json
+python tools/pilot.py image patch.a7c2.image.json private/ILCE-7CM2-2.01-appFw.so --out private/appFw.a7c2.so
 ```
 
 `pilot.patch.v1` 描述要求目标机型、固件、组件、文件大小和完整 SHA-256。
@@ -54,7 +58,7 @@ python tools/pilot.py logs --card D:/ --out F:/PilotLocal/logs/session-1
 
 ## 相机刷写入口
 
-`flash` 调用已有 `on_camera.py`，保留其针对 A6700 的检查、安装、更新与恢复流程：
+`flash` 调用已有 `on_camera.py`；机型由 `--map` 中的 `target` 决定，A6700 2.00 与 A7C II 2.01 共用同一套检查、安装、更新与恢复流程：
 
 ```sh
 python tools/pilot.py flash check --map F:/PilotLocal/patch.json --transport-root F:/PilotLocal/transport --state-dir F:/PilotLocal/device-state
@@ -62,7 +66,7 @@ python tools/pilot.py flash install --map F:/PilotLocal/patch.json --writer F:/P
 ```
 
 刷写入口使用现有 `pilot.patch-map.v1`，与通用补丁描述 `pilot.patch.v1` 分开。
-`--map` 必须提供匹配固件的完整描述和产物哈希；公开说明用的 `patch.a6700.json` 不含完整安装产物信息。
+`--map` 必须提供匹配固件的完整描述和产物哈希；公开说明用的 `patch.a6700.json` / `patch.a7c2.json` 不含完整安装产物信息。A7C II 另附 `patch.a7c2.image.json` 供离线镜像校验，刷写器结果头可用 `flash.header` 覆盖（默认 `A6700PILOTFLASH\n`）。
 USB transport 由本机提供 `cpload_run.py`。帮助、离线校验和 SD 卡操作不加载该依赖。
 真实写入前备份涉及的原文件，设备状态单独写入 `--state-dir/device-state.json`，不改补丁描述。
 
