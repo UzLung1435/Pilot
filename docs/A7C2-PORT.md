@@ -6,7 +6,8 @@
 ## 1. 范围与机型隔离
 
 - 已适配：AP 侧 `appFw.so` 的 DT_INIT 启动钩子（注入岛）、ELF 段扩展、四个补丁窗口、离线镜像描述、刷写入口的机型参数化。
-- 未适配：6K、MenuUI 等模块。两者都硬编码了 ILCE-6700 2.00 的 `appFw` GOT/菜单表/CP 地址，A7C II 的档位表、成像器与 CP 布局不同，构建脚本会直接拒绝非 `a6700` 的机型。
+- 已移植模块：MenuUI。A7C II 没有 A6700 那套页/项表，`modules/menu_ui/a7c2/` 改为在“设置选项”页追加一行、并接管该行打开的原生列表屏 `0x2cb`；构建用 `PILOT_MODEL=a7c2`，产物 `pilot_menu_ui_a7c2.so`，内容树与全部地址见 [a7c2/README.md](../modules/menu_ui/a7c2/README.md)。
+- 未适配：6K。它硬编码了 ILCE-6700 2.00 的录制档位与 CP 参数，A7C II 的档位表、成像器与 CP 布局不同，构建脚本会直接拒绝非 `a6700` 的机型。
 - **不再共用引导产物**：两个机身不再共享 `pilot.so` 或岛内字符串表。机型身份由仓库根的 [`models.json`](../models.json) 唯一定义，`patch/pilot_model.h` 是 C 侧镜像，`tools/pilot_tool/models.py --check` 保证两者不漂移。
 
 | 项目 | A6700 2.00 | A7C II 2.01 |
@@ -147,7 +148,7 @@ sha256sum build/pilot_a7c2.so
 # 省略 PILOT_MODEL 时仍是已验证的 A6700 构建：build/pilot.so
 ```
 
-模块用相同的 `PILOT_MODEL` 编译，并用 `PILOT_DECLARE_MODULE_MODEL()` 导出机型标记；6K 与 MenuUI 目前会在非 `a6700` 时拒绝构建。
+模块用相同的 `PILOT_MODEL` 编译，并用 `PILOT_DECLARE_MODULE_MODEL()` 导出机型标记；MenuUI 已支持 `PILOT_MODEL=a7c2`（另编 `a7c2/pilot_menu_ui_a7c2.c`，产物 `pilot_menu_ui_a7c2.so`），6K 仍会在非 `a6700` 时拒绝构建。
 
 ```c
 #include "pilot.h"
@@ -195,6 +196,6 @@ python tools/pilot.py flash install --map F:/PilotLocal/a7c2/patch.json --writer
 4. **`dlerror` 仅在失败路径使用**：若进程全局解析不到，`x21=0` 会跳过错误文本写入，不影响正常加载。
 5. **`/usr` 空间**：本方案是同尺寸窗口（文件长度不变），但新增 `/usr/lib/pilot_a7c2.so` 仍需几十 KiB 空闲；该分区历史上仅约 58.5 MiB 可用。
 6. **QEMU 验证建议**：用 `work/qemu-deploy/` 的 WSL QEMU 环境（`CHECK_RUNTIME_PASS ILCE-7CM2 2.01`）挂载补丁镜像，先确认 DT_INIT 岛执行、`/tmp_wbshd/pilot-a7c2-boot.bin` 的 PBT1 记录与 `/pilot/log.txt` 启动分隔。
-7. **模块边界**：6K 与 MenuUI 都不是机型中立模块（前者改 A6700 录制档位/CP 参数，后者硬编码 A6700 菜单表与 GOT 偏移），A7C II 需要按 `.data.rel.ro 0x51a82a0` 档位表、成像器能力和本机菜单布局重新逆向。本次未移植任何模块。
+7. **模块边界**：6K 仍不是机型中立模块（改 A6700 录制档位/CP 参数），A7C II 需要按 `.data.rel.ro 0x51a82a0` 档位表与成像器能力重新逆向。MenuUI 已按本机菜单布局重写后端：`modules/menu_ui/a7c2/` 接管原生列表屏 `0x2cb`，`tests/verify_a7c2_offsets.py` 对原厂 `appFw.so` 校验全部地址常量，**未实机验收**。
 8. **DSO 符号检查是字符串级防呆**。`on_camera.py` 与 `deploy.py` 在 PC 端扫描 ELF 中 NUL 结尾的符号名；真正的加载期判定由岛的 `dlsym` 和 `pilot_load_modules()` 完成。故意伪造字符串只能绕过电脑端检查，不能在相机上通过。
 9. **6K baseline 复现**：`pilot.h` 新增机型宏不改变 `PilotApi` 布局或原有导出名，但 `modules/6k/baseline.json` 记录的两个中间 `.so` 哈希仍需在原 AArch64 构建环境复验。
