@@ -16,7 +16,7 @@
 请先安装 Pilot。
 
 1. 将 `pilot_6k.so` 复制到 SD 卡 `/pilot/`。
-2. 在现有 `/pilot/modules.json` 的 `modules` 数组中加入 `pilot_6k.so`，保留其他模块条目。
+2. 在现有 `/pilot/modules.txt` 的 `modules` 数组中加入 `pilot_6k.so`，保留其他模块条目。
 3. 装卡并完整断电重启相机。
 
 单独加载本模块的清单示例：
@@ -45,5 +45,5 @@
 
 ## 停用
 
-从 `/pilot/modules.json` 中移除 `pilot_6k.so`，保留其他模块条目，然后完整断电重启。
+从 `/pilot/modules.txt` 中移除 `pilot_6k.so`，保留其他模块条目，然后完整断电重启。
 原来的 4K HS 录制恢复。

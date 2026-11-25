@@ -19,17 +19,27 @@ What is checked:
 It does not execute anything: this is static evidence, the on-camera behaviour
 still has to be verified on the body.
 
+Two ILCE-7CM2 2.01 sources are accepted, both described by the patch map in
+Pilot/patch.a7c2.json (target.accepted_sources):
+
+    stock  oldProjects/FlashDir/backup1.3/original/appFw.so.bin
+    fl23   oldProjects/FlashDir/backup1.3/candidate/appFw.so, the same image
+           after the FL2/FL3 Creative Look port, whose eight in-place writes
+           stay clear of every address checked here
+
+The source is identified by its whole-image SHA-256, so an unrecorded variant is
+reported instead of silently passing.  --allow-unknown-source inspects such an
+image anyway, in which case only the checked sites are proven to agree.
+
 Usage:
     python verify_a7c2_offsets.py [--image path/to/appFw.so.bin] [--verbose]
-
-The default image path is the ILCE-7CM2 2.01 dump kept outside this repository:
-
-    oldProjects/FlashDir/backup1.3/original/appFw.so.bin
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import struct
 import sys
@@ -44,6 +54,12 @@ except ImportError:  # pragma: no cover - tooling guidance, not a test result
 MODULE_ROOT = Path(__file__).resolve().parent.parent
 HEADER = MODULE_ROOT / "a7c2/pilot_a7c2_menu.h"
 DEFAULT_IMAGE = MODULE_ROOT.parents[2] / "oldProjects/FlashDir/backup1.3/original/appFw.so.bin"
+PATCH_MAP = MODULE_ROOT.parents[1] / "patch.a7c2.json"
+
+# The accepted A7C II image sources live with the installer so both sides read
+# the same hashes; importing them keeps this script free of a second table.
+sys.path.insert(0, str(MODULE_ROOT.parents[1] / "patch"))
+from on_camera_profiles import classify_digest, describe  # noqa: E402
 
 # ILCE-7CM2 2.01 appFw.so.  Recorded from the update payload and re-derived by
 # the source-rebuild work in a7c2-re/report/2026-11-05-appfw-source-rebuild.
@@ -345,22 +361,62 @@ def check_header(chk: Checker, image: Image, constants: dict[str, int]) -> None:
             chk.check(False, f"header define {name} is file backed", str(error))
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def report_source(image_path: Path, allow_unknown: bool) -> bool:
+    """Identify the image against the recorded sources; return False to stop."""
+    if not PATCH_MAP.is_file():
+        print(f"source: profile check skipped ({PATCH_MAP.name} not found)")
+        return True
+    patch_map = json.loads(PATCH_MAP.read_text(encoding="utf-8-sig"))
+    digest = sha256_file(image_path)
+    state, profile = classify_digest(digest, image_path.stat().st_size, patch_map)
+    print(f"sha256 {digest}")
+    if state == "baseline":
+        print(f"source: profile={profile} (recorded, unpatched)")
+        return True
+    if state == "patched":
+        print(f"source: profile={profile} already carries the Pilot AP patch",
+              file=sys.stderr)
+        print("this dump is not a source image; restore the AP and dump again",
+              file=sys.stderr)
+        return False
+    print(f"source: not a recorded ILCE-7CM2 2.01 image ({describe(patch_map)})",
+          file=sys.stderr)
+    if allow_unknown:
+        print("source: --allow-unknown-source, checking the sites anyway")
+        return True
+    print("pass --allow-unknown-source to check the constants anyway",
+          file=sys.stderr)
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--image", type=Path, default=DEFAULT_IMAGE,
-                        help="stock ILCE-7CM2 2.01 appFw.so dump")
+                        help="ILCE-7CM2 2.01 appFw.so dump (stock or FL23)")
+    parser.add_argument("--allow-unknown-source", action="store_true",
+                        help="check the sites even when the image hash is unrecorded")
     parser.add_argument("--verbose", action="store_true", help="print passing checks too")
     args = parser.parse_args()
 
     image_path = args.image.expanduser()
     if not image_path.is_file():
         print(f"image not found: {image_path}", file=sys.stderr)
-        print("pass --image to point at a stock ILCE-7CM2 2.01 appFw.so dump", file=sys.stderr)
+        print("pass --image to point at an ILCE-7CM2 2.01 appFw.so dump", file=sys.stderr)
         return 2
 
     chk = Checker(args.verbose)
     print(f"image  {image_path}  ({image_path.stat().st_size} bytes)")
     print(f"header {HEADER.relative_to(MODULE_ROOT)}")
+    if not report_source(image_path, args.allow_unknown_source):
+        return 1
 
     constants = parse_header(HEADER)
     if not constants:

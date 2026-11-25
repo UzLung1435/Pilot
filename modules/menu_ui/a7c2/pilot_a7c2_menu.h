@@ -100,6 +100,22 @@ typedef void (*text_id_fn)(void *, uint32_t);
 typedef void (*text_bytes_fn)(void *, const char *);
 typedef void (*model_lock_fn)(void *);
 
+/* --- source variant ------------------------------------------------------
+ *
+ * The FL23 Creative Look port rewrites eight small stock AP regions in place;
+ * none of them is a menu surface, so the same backend serves both images.  The
+ * variant is only fingerprinted (FNV-1a 64 over those eight regions) so the
+ * camera log names the image it was installed into.  Both digests come from
+ * work/menu_ui_a7c2/fl23_signature.py, which derives them from the FL23 patch
+ * table and prints this block; keep the two in step. */
+#define PILOT_A7C2_SOURCE_UNKNOWN 0u
+#define PILOT_A7C2_SOURCE_STOCK 1u
+#define PILOT_A7C2_SOURCE_FL23 2u
+#define PILOT_A7C2_SOURCE_WINDOWS 8u
+#define PILOT_A7C2_SOURCE_BYTES 134u
+#define PILOT_A7C2_SOURCE_SIG_STOCK 0xe1385cbf0fba1dfeull
+#define PILOT_A7C2_SOURCE_SIG_FL23 0x2aecac76204ba811ull
+
 /* Diagnostics.  Written by the hooks, read by the host-side verifier and by
  * the "status" page of the menu itself.  Layout is part of the ABI: keep the
  * magic when changing it. */

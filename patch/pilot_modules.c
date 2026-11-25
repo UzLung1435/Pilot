@@ -340,7 +340,8 @@ void pilot_load_modules(void)
 
     char manifest_path[64];
     int path_size = snprintf(manifest_path, sizeof(manifest_path),
-                             "%c:/pilot/modules.json", g_pilot.drive_letter);
+                             "%c:/pilot/%s", g_pilot.drive_letter,
+                             PILOT_MANIFEST_NAME);
     if (path_size <= 0 || (size_t)path_size >= sizeof(manifest_path)) {
         __atomic_store_n(&g_pilot.optional_features_enabled, 0, __ATOMIC_RELEASE);
         return;
@@ -357,7 +358,7 @@ void pilot_load_modules(void)
                                                   &not_found);
     if (read_status != PILOT_STATUS_OK) {
         if (not_found) {
-            module_log("Pilot modules.json not found; no modules loaded");
+            module_log("Pilot " PILOT_MANIFEST_NAME " not found; no modules loaded");
             if (pilot_fuse_append_state(PILOT_FUSE_STATE_COMPLETE,
                                         PILOT_FNV64_OFFSET) != PILOT_STATUS_OK)
                 module_log("Pilot module fuse completion record failed");
@@ -371,14 +372,14 @@ void pilot_load_modules(void)
     char names[PILOT_MODULE_MAX_COUNT][PILOT_MODULE_NAME_CAPACITY] = {{0}};
     size_t count = 0;
     if (!parse_modules_json(manifest, manifest_length, names, &count)) {
-        module_log("Pilot modules.json rejected; optional features disabled");
+        module_log("Pilot " PILOT_MANIFEST_NAME " rejected; optional features disabled");
         __atomic_store_n(&g_pilot.optional_features_enabled, 0, __ATOMIC_RELEASE);
         return;
     }
     {
         char message[128];
         int length = snprintf(message, sizeof(message),
-                              "Pilot modules.json loaded count=%zu", count);
+                              "Pilot " PILOT_MANIFEST_NAME " loaded count=%zu", count);
         if (length > 0 && (size_t)length < sizeof(message))
             module_log(message);
     }

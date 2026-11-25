@@ -8,7 +8,23 @@
     "binary_size": 99960744,
     "binary_sha256": "2ea02f7ecbc5bb917316fe8ef4ce5ffd87eb66efaae78ba2ce11420552df539b",
     "patched_binary_sha256": "48da79886ecef1b8ee4d6250ed54c5e352ab8a9ab5a84b6e00a684182a3d21dc",
-    "coordinate_rule": "PT_LOAD[0] has p_offset=0 and p_vaddr=0, so VA equals file offset for the listed code sites; the writable PT_LOAD[1] and its GOT/data sections use VA = file offset + 0x10000."
+    "coordinate_rule": "PT_LOAD[0] has p_offset=0 and p_vaddr=0, so VA equals file offset for the listed code sites; the writable PT_LOAD[1] and its GOT/data sections use VA = file offset + 0x10000.",
+    "accepted_sources": [
+      {
+        "profile": "stock",
+        "binary_sha256": "2ea02f7ecbc5bb917316fe8ef4ce5ffd87eb66efaae78ba2ce11420552df539b",
+        "patched_binary_sha256": "48da79886ecef1b8ee4d6250ed54c5e352ab8a9ab5a84b6e00a684182a3d21dc",
+        "size_bytes": 99960744,
+        "note": "factory ILCE-7CM2 2.01 AP image; the canonical Pilot baseline"
+      },
+      {
+        "profile": "fl23",
+        "binary_sha256": "1aaeb8fbe0297950cab454d498d1a5ba874f91542aa2737aae27a73971e324d7",
+        "patched_binary_sha256": "cee593031b7012d2ee1dd831d2978f0c88f48c1389de63f3cc49e52ac050ef01",
+        "size_bytes": 99960744,
+        "note": "factory image plus the FL2/FL3 Creative Look port (oldProjects/a7c2-fl23-research): eight in-place writes of identical length, none inside a Pilot patch window"
+      }
+    ]
   },
   "runtime": {
     "model_id": "a7c2",
@@ -204,11 +220,12 @@
     }
   ],
   "preconditions": [
-    "The input image must be the stock ILCE-7CM2 2.01 appFw.so with the recorded SHA-256.",
+    "The input image must be one of the recorded ILCE-7CM2 2.01 appFw.so sources: the stock image or the FL2/FL3 Creative Look port listed in target.accepted_sources.",
     "The DT_INIT hook-site instruction and the complete island range must match the recorded original bytes.",
     "Both PT_LOAD[0] sizes must match the recorded baseline value before expansion.",
     "The bootstrap pilot_a7c2.so must be staged at /usr/lib/pilot_a7c2.so and export pilot_a7c2_v1_marker / pilot_a7c2_v1_on_mount / pilot_a7c2_get_api before DT_INIT returns.",
     "SD modules must export pilot_module_model_a7c2; the framework refuses modules carrying another body's tag before calling pilot_module_init().",
-    "This is a structural description: installation additionally requires a matching AP writer, DSO hashes and USB transport in a local patch.json."
+    "This is a structural description: installation additionally requires a matching AP writer, DSO hashes and USB transport in a local patch.json.",
+    "Every patch window is applied only when all of its recorded original bytes match, so an unlisted source variant is still refused before any write."
   ]
 }

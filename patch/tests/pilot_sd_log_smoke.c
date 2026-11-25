@@ -354,7 +354,8 @@ int main(int argc, char **argv)
     char log_path[512];
     char fuse_path[512];
     if (snprintf(pilot_dir, sizeof(pilot_dir), "%s/pilot", card_root) <= 0 ||
-        snprintf(manifest_path, sizeof(manifest_path), "%s/pilot/modules.json", card_root) <= 0 ||
+        snprintf(manifest_path, sizeof(manifest_path),
+                 "%s/pilot/" PILOT_MANIFEST_NAME, card_root) <= 0 ||
         snprintf(module_card_path, sizeof(module_card_path),
                  "%s/pilot/%s", card_root, module_name) <= 0 ||
         snprintf(staged_module_path, sizeof(staged_module_path),

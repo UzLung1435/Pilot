@@ -16,6 +16,18 @@ extern "C" {
 #define PILOT_MODULE_FILE_TRANSFER_MAX (1024u * 1024u)
 #define PILOT_CP_MEM_TRANSFER_MAX 4096u
 
+/* Card-side module manifest inside /pilot/.  The camera Fsys validates the
+ * extension of every Fsys_Open() call and refuses .json with status
+ * 0x80000041 (invalid argument) while accepting .txt and .so, so the manifest
+ * keeps JSON content but must not use a .json name.  Measured on an
+ * ILCE-7CM2 (a7c2) body; see docs/USAGE.md. */
+#define PILOT_MANIFEST_NAME "modules.txt"
+
+/* Optional per-module configuration under /pilot/modules/<stem>/.  Same Fsys
+ * extension restriction as PILOT_MANIFEST_NAME: the content stays JSON, only
+ * the name is forced onto an extension the camera accepts. */
+#define PILOT_MODULE_CONFIG_NAME "config.txt"
+
 typedef int32_t PilotStatus;
 
 enum {
@@ -114,7 +126,7 @@ typedef struct PilotApi {
                                   char *buffer,
                                   size_t capacity);
     /* Module-bound namespaces. file and mlog point to persistent tables
-     * scoped to the module filename stem from modules.json. */
+     * scoped to the module filename stem from PILOT_MANIFEST_NAME. */
     const PilotFileApi *file;
     const PilotLogApi *log;
     const PilotModuleLogApi *mlog;

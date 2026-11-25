@@ -16,7 +16,7 @@
 ## 安装
 
 1. 将 `pilot_menu_ui.so` 复制到 SD 卡的 `/pilot/` 目录。
-2. 在现有 `/pilot/modules.json` 的 `modules` 数组中加入 `pilot_menu_ui.so`，保留其他模块条目。
+2. 在现有 `/pilot/modules.txt` 的 `modules` 数组中加入 `pilot_menu_ui.so`，保留其他模块条目。
 3. 装卡并完整断电重启相机。
 4. 打开“自定义设置 → Pilot”。
 
@@ -38,5 +38,5 @@
 
 ## 停用
 
-从 `/pilot/modules.json` 中移除 `pilot_menu_ui.so`，然后完整断电重启。
+从 `/pilot/modules.txt` 中移除 `pilot_menu_ui.so`，然后完整断电重启。
 保留其他模块条目，可继续使用对应功能。

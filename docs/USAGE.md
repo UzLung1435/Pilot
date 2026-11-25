@@ -61,8 +61,10 @@ python tools/pilot.py flash install @pilotArgs --yes
 
 ## 3. 安装扩展模块
 
-将模块文件放入 SD 卡 `/pilot/`，并将文件名加入现有 `/pilot/modules.json` 的 `modules` 数组，保留其他条目及加载顺序。
+将模块文件放入 SD 卡 `/pilot/`，并将文件名加入现有 `/pilot/modules.txt` 的 `modules` 数组，保留其他条目及加载顺序。
 模块的兼容性、下载和具体使用方式以各自的发布说明为准；**只安装与相机机型相同的模块**。
+
+清单内容仍是 JSON（`{"modules": ["pilot_example.so"]}`），但文件名必须是 `modules.txt`：相机固件的 Fsys 会校验打开文件的扩展名，`.json` 会被拒绝为 `0x80000041`（参数非法），而 `.txt`、`.so` 可以正常打开。旧卡上的 `modules.json` 只在上一代工具里有效，相机端不会读取；`python tools/pilot.py modules deploy` 会自动读出旧清单并同时写入 `modules.txt`。
 
 用工具部署时显式传入机型，会校验模块的 `pilot_module_model_<id>` 标记，避免把 A6700 模块装到 A7C II（或反之）：
 
@@ -72,6 +74,22 @@ python tools/pilot.py modules deploy private/a7c2_example.so --card D:/ --model 
 ```
 
 相机端还有第二道检查：框架在 `dlopen` 之后、调用 `pilot_module_init` 之前用 `dlsym` 核对机型标记，不匹配时会在 `/pilot/log.txt` 记录 `model mismatch` 并隔离整个模块包。
+
+### 清单文件名：为什么是 `modules.txt`
+
+相机固件的 Fsys 在打开文件时校验扩展名。ILCE-7CM II（`a7c2`，固件 2.01）实测，所有文件都在 SD 卡 `/pilot/`、同一张卡、由宿主写入：
+
+| 卡上文件 | `Fsys_Open` 结果 |
+| --- | --- |
+| `modules.json` | `0x80000041`（参数非法），读不到内容 |
+| `MODULES.JSON`（8.3 大写、1980 时间戳） | 仍是 `0x80000041`，与大小写、长文件名、时间戳、大小无关 |
+| `modules.txt` | `0`，正常读出 |
+| `probe.txt`（任意内容） | `0`，正常读出 |
+| `MNUI.SO`（模块本体） | `0`，正常读出 |
+
+`0x80000041` 不是"文件不存在"（那是 `0x80000051`）。旧版加载器把非 not-found 的读错误当作"可选功能不可用"，静默禁用整套模块且不写日志，表现为菜单里看不到模块、日志里也查不到原因。
+
+因此：清单固定为 `/pilot/modules.txt`（`patch/pilot.h` 的 `PILOT_MANIFEST_NAME`），内容仍是 JSON；模块自带的可选配置同理，固定为 `/pilot/modules/<模块名>/config.txt`（`PILOT_MODULE_CONFIG_NAME`）。
 
 ## 4. 日志与停用
 

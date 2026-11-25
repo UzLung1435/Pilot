@@ -55,6 +55,7 @@ python tools/pilot.py logs --card D:/ --out F:/PilotLocal/logs/session-1
 
 部署检查模块 SHA-256、ELF64 AArch64 和现有清单，先将原模块和清单备份到卡外目录。
 更新模块时保留原有加载顺序，再回读模块并原子替换清单。
+清单文件是 `/pilot/modules.txt`（内容为 JSON），因为相机 Fsys 会拒绝打开 `.json`（`0x80000041`）；卡上遗留的旧 `modules.json` 会被读出并把内容同时写入两者，便于迁移。详见 [使用说明](../docs/USAGE.md)。
 日志导出只复制 Pilot 主日志及清单模块对应的 `module.log`。
 
 `--model` 从 `models.json` 取机型，要求模块导出且仅导出 `pilot_module_model_<model>`，并拒绝以其它机型 ID 开头的文件名。

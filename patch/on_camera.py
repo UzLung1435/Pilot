@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 
 from on_camera_config import add_path_arguments, resolve_paths
+from on_camera_profiles import classify, describe, source_profiles
+from on_camera_profiles import validate as validate_profiles
 
 
 PATCH_DIR = Path(__file__).resolve().parent
@@ -160,6 +162,10 @@ def load_map() -> dict:
     patch_map = json.loads(MAP_PATH.read_text(encoding="utf-8-sig"))
     if patch_map.get("schema") != "pilot.patch-map.v1":
         raise RuntimeError("unsupported patch map")
+    try:
+        validate_profiles(patch_map)
+    except ValueError as error:
+        raise RuntimeError(f"invalid accepted_sources: {error}") from error
     return patch_map
 
 
@@ -256,15 +262,7 @@ def load_pilot(patch_map: dict) -> bytes:
 
 
 def ap_state(data: bytes, patch_map: dict) -> str:
-    target = patch_map["target"]
-    if len(data) != target["binary_size"]:
-        return "unknown"
-    digest = sha256(data)
-    if digest == target["binary_sha256"]:
-        return "baseline"
-    if digest == target.get("patched_binary_sha256"):
-        return "patched"
-    return "unknown"
+    return classify(data, patch_map)[0]
 
 
 def read_ap(session: cr.Session) -> bytes:
@@ -386,8 +384,11 @@ def print_result(data: bytes) -> None:
 
 
 def record_camera_state(patch_map: dict, mode: str, before_hash: str,
-                        after_hash: str, result: bytes) -> None:
+                        after_hash: str, result: bytes,
+                        profile: str | None = None) -> None:
     applied = mode == "write"
+    sources = {row["profile"]: row for row in source_profiles(patch_map)}
+    source = sources.get(profile or "", {})
     save_device_state({
         "schema": "pilot.device-state.v1",
         "status": "applied_pending_power_cycle" if applied
@@ -395,10 +396,19 @@ def record_camera_state(patch_map: dict, mode: str, before_hash: str,
         "target": patch_map["target"].get("model"),
         "firmware": patch_map["target"].get("firmware"),
         "camera_applied": applied,
+        "source_profiles": [
+            {key: row[key] for key in
+             ("profile", "binary_sha256", "patched_binary_sha256")}
+            for row in source_profiles(patch_map)
+        ],
         "camera_installation": {
             "last_operation": "install" if applied else "restore",
-            "baseline_sha256": patch_map["target"]["binary_sha256"],
-            "patched_sha256": patch_map["target"]["patched_binary_sha256"],
+            "source_profile": profile,
+            "baseline_sha256": source.get(
+                "binary_sha256", patch_map["target"]["binary_sha256"]),
+            "patched_sha256": source.get(
+                "patched_binary_sha256",
+                patch_map["target"]["patched_binary_sha256"]),
             "before_sha256": before_hash,
             "after_sha256": after_hash,
             "writer_result": result.decode("ascii", "replace").strip(),
@@ -409,12 +419,13 @@ def record_camera_state(patch_map: dict, mode: str, before_hash: str,
 
 def run_check(session: cr.Session, patch_map: dict) -> int:
     data = read_ap(session)
-    state = ap_state(data, patch_map)
+    state, profile = classify(data, patch_map)
     print(f"appFw.so: {len(data)} bytes sha256={sha256(data)}")
     if state == "unknown":
-        print("state: unknown; no files were written")
+        print(f"state: unknown; accepted sources: {describe(patch_map)}")
+        print("no files were written")
         return 3
-    print(f"state: {state}")
+    print(f"state: {state} profile={profile}")
     if state == "patched":
         bootstrap = session.read_path(PILOT_DEVICE_PATH, missing=True)
         expected = patch_map["pilot_dso"]
@@ -437,10 +448,12 @@ def run_write(session: cr.Session, patch_map: dict, writer: bytes,
 
     before = read_ap(session)
     before_hash = sha256(before)
-    state = ap_state(before, patch_map)
-    print(f"before appFw: {len(before)} bytes sha256={before_hash} state={state}")
+    state, profile = classify(before, patch_map)
+    print(f"before appFw: {len(before)} bytes sha256={before_hash} "
+          f"state={state} profile={profile}")
     if state == "unknown":
-        raise RuntimeError("appFw is neither the recorded camera baseline nor Pilot image")
+        raise RuntimeError("appFw matches neither an accepted camera image "
+                           f"({describe(patch_map)}) nor a Pilot-patched image")
 
     if mode == "write":
         ensure_no_flash_files(session)
@@ -459,8 +472,9 @@ def run_write(session: cr.Session, patch_map: dict, writer: bytes,
     print_result(result)
     after = read_ap(session)
     after_hash = sha256(after)
-    after_state = ap_state(after, patch_map)
-    print(f"after appFw:  {len(after)} bytes sha256={after_hash} state={after_state}")
+    after_state, after_profile = classify(after, patch_map)
+    print(f"after appFw:  {len(after)} bytes sha256={after_hash} "
+          f"state={after_state} profile={after_profile}")
 
     expected_state = "patched" if mode == "write" else "baseline"
     if b"RESULT=OK" not in result or after_state != expected_state:
@@ -489,7 +503,8 @@ def run_write(session: cr.Session, patch_map: dict, writer: bytes,
         save_device_state(pilot_state)
         print(f"persistent bootstrap readback OK: {len(pilot)} bytes sha256={sha256(pilot)}")
 
-    record_camera_state(patch_map, mode, before_hash, after_hash, result)
+    record_camera_state(patch_map, mode, before_hash, after_hash, result,
+                        profile)
 
     remove_result_if_matches(session, result)
     if mode == "write":
@@ -575,6 +590,7 @@ def main() -> int:
           f"module tag: {runtime['module_model_symbol']}")
     print(f"baseline sha256: {patch_map['target']['binary_sha256']}")
     print(f"patched sha256: {patch_map['target']['patched_binary_sha256']}")
+    print(f"accepted sources: {describe(patch_map)}")
     if writer is not None:
         print(f"AP writer: {len(writer)} bytes sha256={sha256(writer)}")
     if pilot:

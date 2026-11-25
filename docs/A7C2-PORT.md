@@ -183,6 +183,15 @@ python tools/pilot.py modules deploy private/a7c2_example.so --card D:/ \
 
 `runtime` 块决定设备路径、默认结果头（`A7C2PILOTFLASH\n`）与 DSO 符号校验；若私有刷写器仍输出 `A6700PILOTFLASH\n`，在 `patch.json` 加 `"flash": {"header": "A6700PILOTFLASH\n"}` 覆盖。writer 与常驻 DSO 均不得超过 Jiritsu 的 64 KiB 传输上限。`--pilot` 省略时默认取 `build/<runtime.dso_soname>`。
 
+`target` 也接受按来源分列的写法：`accepted_sources` 是 `{profile, binary_sha256, patched_binary_sha256, size_bytes, note}` 的数组，安装器用 `patch/on_camera_profiles.py` 按整镜像 SHA-256 判定来源（`stock` 可省略，缺省时按 `target.binary_sha256` 补位）。公开的 `patch.a7c2.json` 已登记两个 2.01 来源：
+
+| profile | 源镜像 | 装 Pilot 后 |
+|---|---|---|
+| `stock` | `2ea02f7e…539b` | `48da7988…a21dc` |
+| `fl23` | `1aaeb8fb…24d7` | `cee59303…f01` |
+
+FL23 是 FL2/FL3 Creative Look 移植（`oldProjects/a7c2-fl23-research/`），它对 `appFw.so` 的 8 处原地改写与 MenuUI 校验的地址零重叠，因此同一份模块与同一组四个窗口在两种来源上都成立；`verify_a7c2_offsets.py` 对两份镜像各跑 120 项全通过。
+
 ```sh
 python tools/pilot.py flash check   --map F:/PilotLocal/a7c2/patch.json --transport-root <transport> --state-dir <state>
 python tools/pilot.py flash install --map F:/PilotLocal/a7c2/patch.json --writer <pilot_ap_flash.so> --pilot <pilot_a7c2.so> --transport-root <transport> --state-dir <state> --yes
@@ -194,8 +203,8 @@ python tools/pilot.py flash install --map F:/PilotLocal/a7c2/patch.json --writer
 2. **签名与信任链**。修改 `appFw.so` 会破坏该分区的校验；知识库记录了同机公钥、WBI 规则和 3.10 更新事故，`p1chksum` 的消费者仍未定位。**先 QEMU/离线验证，再谈实机**，并保留原文件备份与完整断电恢复手段。
 3. **未做实机加载**。DT_INIT 阶段 `dlopen` `pilot_a7c2.so`、constructor 建线程、`dlsym(RTLD_DEFAULT)` 命中 `libInfraFsys.so`、SD 卡盘符（`BXACDE`）与 disable 标记，都只做了静态与库导出层面的论证，尚无 A7C II 真机日志。
 4. **`dlerror` 仅在失败路径使用**：若进程全局解析不到，`x21=0` 会跳过错误文本写入，不影响正常加载。
-5. **`/usr` 空间**：本方案是同尺寸窗口（文件长度不变），但新增 `/usr/lib/pilot_a7c2.so` 仍需几十 KiB 空闲；该分区历史上仅约 58.5 MiB 可用。
+5. **`/usr` 空间**：本方案是同尺寸窗口（文件长度不变），但新增 `/usr/lib/pilot_a7c2.so` 仍需几十 KiB 空闲；该分区历史上仅约 58.5 MiB 可用。**常驻 DSO 超限**：当前 `build/pilot_a7c2.so` 为 75,528 B，`-Os -ffunction-sections -Wl,--gc-sections -Wl,--strip-all` 最好也只到 67,712 B，均高于 Jiritsu 的 64 KiB 传输上限；走私有 `load_pilot` 通道要么裁功能，要么改走离线镜像写入（本工作树未验证前者）。
 6. **QEMU 验证建议**：用 `work/qemu-deploy/` 的 WSL QEMU 环境（`CHECK_RUNTIME_PASS ILCE-7CM2 2.01`）挂载补丁镜像，先确认 DT_INIT 岛执行、`/tmp_wbshd/pilot-a7c2-boot.bin` 的 PBT1 记录与 `/pilot/log.txt` 启动分隔。
-7. **模块边界**：6K 仍不是机型中立模块（改 A6700 录制档位/CP 参数），A7C II 需要按 `.data.rel.ro 0x51a82a0` 档位表与成像器能力重新逆向。MenuUI 已按本机菜单布局重写后端：`modules/menu_ui/a7c2/` 接管原生列表屏 `0x2cb`，`tests/verify_a7c2_offsets.py` 对原厂 `appFw.so` 校验全部地址常量，**未实机验收**。
+7. **模块边界**：6K 仍不是机型中立模块（改 A6700 录制档位/CP 参数），A7C II 需要按 `.data.rel.ro 0x51a82a0` 档位表与成像器能力重新逆向。MenuUI 已按本机菜单布局重写后端：`modules/menu_ui/a7c2/` 接管原生列表屏 `0x2cb`，`tests/verify_a7c2_offsets.py` 对原厂与 FL23 两份 `appFw.so` 各校验 120 项地址常量（模块运行期另做 FNV 指纹，日志记 `appFw source profile=stock|fl23`），**未实机验收**。
 8. **DSO 符号检查是字符串级防呆**。`on_camera.py` 与 `deploy.py` 在 PC 端扫描 ELF 中 NUL 结尾的符号名；真正的加载期判定由岛的 `dlsym` 和 `pilot_load_modules()` 完成。故意伪造字符串只能绕过电脑端检查，不能在相机上通过。
 9. **6K baseline 复现**：`pilot.h` 新增机型宏不改变 `PilotApi` 布局或原有导出名，但 `modules/6k/baseline.json` 记录的两个中间 `.so` 哈希仍需在原 AArch64 构建环境复验。

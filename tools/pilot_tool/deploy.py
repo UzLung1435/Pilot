@@ -17,6 +17,11 @@ from .models import model_ids, module_model_symbol
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}\.so$")
 _LOGS = ("log.txt",)
 _MODEL_TAG = re.compile(rb"pilot_module_model_([a-z][a-z0-9_]{0,15})\x00")
+# The camera Fsys validates extensions and rejects .json opens with 0x80000041,
+# so the manifest carries JSON content under a .txt name.  cards written by
+# older tool versions still have modules.json and are migrated on next deploy.
+_MANIFEST = "modules.txt"
+_LEGACY_MANIFESTS = ("modules.json",)
 
 
 def _no_symlink(path: Path, *, allow_missing: bool = False) -> None:
@@ -45,6 +50,19 @@ def _safe_card_file(card: Path, relative: str, *, optional: bool = False) -> Pat
 
 def _module_name(name: str) -> bool:
     return bool(len(name) <= 64 and _NAME.fullmatch(name) and not name.startswith(".") and ".." not in name and "/" not in name and "\\" not in name)
+
+
+def _manifest_file(card: Path, *, optional: bool) -> Path:
+    """Return the card manifest path, preferring the Fsys-safe .txt name.
+
+    A card may still carry the legacy modules.json; it is read so the next
+    deploy migrates the contents instead of dropping the existing module list.
+    """
+    for name in (_MANIFEST, *_LEGACY_MANIFESTS):
+        path = _safe_card_file(card, f"pilot/{name}", optional=True)
+        if path.exists():
+            return path
+    return _safe_card_file(card, f"pilot/{_MANIFEST}", optional=optional)
 
 
 def _read_manifest(path: Path) -> list[str]:
@@ -153,7 +171,7 @@ def deploy_module(module: Path, card: Path, expected_sha256: str,
     _no_symlink(pilot, allow_missing=True)
     if pilot.exists() and not pilot.is_dir():
         raise ValueError("/pilot must be a directory")
-    manifest = _safe_card_file(card, "pilot/modules.json", optional=True)
+    manifest = _manifest_file(card, optional=True)
     target = _safe_card_file(card, f"pilot/{module.name}", optional=True)
     names = _read_manifest(manifest)
     merged = list(dict.fromkeys(names))
@@ -165,8 +183,15 @@ def deploy_module(module: Path, card: Path, expected_sha256: str,
     # All source and current-card inputs are validated before allocating backups
     # or changing card contents.
     backup = _backup_dir(backup_dir, card)
-    if manifest.exists():
-        shutil.copy2(manifest, backup / "modules.json")
+    # Write the Fsys-safe name and, when a legacy manifest is already on the
+    # card, mirror the payload into it so both stay consistent.
+    manifests = [_safe_card_file(card, f"pilot/{_MANIFEST}", optional=True)]
+    legacy = _safe_card_file(card, f"pilot/{_LEGACY_MANIFESTS[0]}", optional=True)
+    if legacy.exists():
+        manifests.append(legacy)
+    for path in manifests:
+        if path.exists():
+            shutil.copy2(path, backup / path.name)
     if target.exists():
         shutil.copy2(target, backup / module.name)
 
@@ -186,17 +211,18 @@ def deploy_module(module: Path, card: Path, expected_sha256: str,
             raise IOError("installed module SHA-256 mismatch")
 
         payload = json.dumps({"modules": merged}, ensure_ascii=False, indent=2) + "\n"
-        fd, temp_name = tempfile.mkstemp(prefix=".modules.", suffix=".tmp", dir=pilot)
-        temp_manifest = Path(temp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp_manifest, manifest)
-        finally:
-            if temp_manifest.exists():
-                temp_manifest.unlink()
+        for destination in manifests:
+            fd, temp_name = tempfile.mkstemp(prefix=".modules.", suffix=".tmp", dir=pilot)
+            temp_manifest = Path(temp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp_manifest, destination)
+            finally:
+                if temp_manifest.exists():
+                    temp_manifest.unlink()
     finally:
         if temp_module.exists():
             temp_module.unlink()
@@ -206,7 +232,7 @@ def deploy_module(module: Path, card: Path, expected_sha256: str,
 
 def list_modules(card: Path) -> list[dict[str, str]]:
     """Return manifest modules and hashes for files directly under /pilot."""
-    manifest = _safe_card_file(Path(card), "pilot/modules.json")
+    manifest = _manifest_file(Path(card), optional=False)
     names = _read_manifest(manifest)
     result = []
     for name in names:
@@ -224,7 +250,7 @@ def export_logs(card: Path, out: Path) -> dict[str, Any]:
     _no_symlink(out, allow_missing=True)
     if card.resolve() == out.resolve() or card.resolve() in out.resolve().parents or out.resolve() in card.resolve().parents:
         raise ValueError("log output must be outside the card")
-    names = _read_manifest(_safe_card_file(card, "pilot/modules.json", optional=True))
+    names = _read_manifest(_manifest_file(card, optional=True))
     sources = [("pilot/log.txt", "log.txt")]
     sources.extend((f"pilot/modules/{Path(name).stem}/module.log", f"modules/{Path(name).stem}/module.log") for name in names)
     out.mkdir(parents=True, exist_ok=True)

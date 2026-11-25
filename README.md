@@ -52,7 +52,7 @@ A7C II 的固件依据、注入岛重定位、四个补丁窗口与未验项见 
 ```text
 
 2026-11-22T00:00:00Z Pilot startup: ...
-2026-11-22T00:00:00Z Pilot modules.json loaded count=1
+2026-11-22T00:00:00Z Pilot modules.txt loaded count=1
 2026-11-22T00:00:00Z name=pilot_menu_ui.so Pilot module loading index=1/1 path=/tmp_wbshd/pilot/modules/pilot_menu_ui.so
 2026-11-22T00:00:00Z name=pilot_menu_ui.so Pilot module initialized index=1/1 status=0
 ```

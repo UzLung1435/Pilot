@@ -23,7 +23,7 @@ class DeployTests(unittest.TestCase):
     def test_update_keeps_load_order_and_rejects_card_side_backup(self):
         pilot = self.card / "pilot"
         pilot.mkdir()
-        manifest = pilot / "modules.json"
+        manifest = pilot / "modules.txt"
         manifest.write_text('{"modules": ["demo.so", "later.so"]}', encoding="utf-8")
         with self.assertRaises(ValueError):
             deploy_module(self.source, self.card, self.digest(), pilot / "backups")
@@ -64,7 +64,7 @@ class DeployTests(unittest.TestCase):
     def test_rejects_unknown_fields_and_bad_manifest(self):
         pilot = self.card / "pilot"
         pilot.mkdir()
-        manifest = pilot / "modules.json"
+        manifest = pilot / "modules.txt"
         for raw in ('{"modules": [], "extra": 1}', '{"modules": "demo.so"}', '{"modules": ["../bad.so"]}'):
             manifest.write_text(raw, encoding="utf-8")
             with self.assertRaises(ValueError):
@@ -74,13 +74,13 @@ class DeployTests(unittest.TestCase):
     def test_backups_keep_existing_manifest_and_same_name_module(self):
         pilot = self.card / "pilot"
         pilot.mkdir()
-        manifest = pilot / "modules.json"
+        manifest = pilot / "modules.txt"
         manifest.write_text('{"modules": ["old.so"]}', encoding="utf-8")
         old = pilot / "demo.so"
         old.write_bytes(b"old module")
         result = deploy_module(self.source, self.card, self.digest(), self.backups)
         backup = Path(result["backup_dir"])
-        self.assertEqual((backup / "modules.json").read_text(encoding="utf-8"), '{"modules": ["old.so"]}')
+        self.assertEqual((backup / "modules.txt").read_text(encoding="utf-8"), '{"modules": ["old.so"]}')
         self.assertEqual((backup / "demo.so").read_bytes(), b"old module")
         self.assertEqual(json.loads(manifest.read_text(encoding="utf-8")), {"modules": ["old.so", "demo.so"]})
 
@@ -114,7 +114,7 @@ class DeployTests(unittest.TestCase):
         pilot = self.card / "pilot"
         module_dir = pilot / "modules" / "demo"
         module_dir.mkdir(parents=True)
-        (pilot / "modules.json").write_text('{"modules": ["demo.so"]}', encoding="utf-8")
+        (pilot / "modules.txt").write_text('{"modules": ["demo.so"]}', encoding="utf-8")
         outside = self.root / "private.log"
         outside.write_text("private", encoding="utf-8")
         log_path = module_dir / "module.log"
@@ -129,6 +129,18 @@ class DeployTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 export_logs(self.card, self.root / "export")
         self.assertFalse((self.root / "export" / "modules" / "demo" / "module.log").exists())
+
+    def test_legacy_json_manifest_is_read_and_migrated(self):
+        pilot = self.card / "pilot"
+        pilot.mkdir()
+        legacy = pilot / "modules.json"
+        legacy.write_text('{"modules": ["old.so"]}', encoding="utf-8")
+        result = deploy_module(self.source, self.card, self.digest(), self.backups)
+        self.assertEqual(result["modules"], ["old.so", "demo.so"])
+        migrated = json.loads((pilot / "modules.txt").read_text(encoding="utf-8"))
+        self.assertEqual(migrated, {"modules": ["old.so", "demo.so"]})
+        # The legacy file keeps the same list so older tooling stays consistent.
+        self.assertEqual(json.loads(legacy.read_text(encoding="utf-8")), migrated)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,11 @@
 - 构建脚本改由 `PILOT_MODEL` 选择机型（默认 `a6700`），输出名、soname、导出符号检查同步；6K 与 MenuUI 因硬编码 A6700 地址，拒绝其它机型构建。
 - 结果镜像 SHA-256 更新为 `48da7988…a21dc`（机型化岛字符串表后；旧的共用身份版本已作废）。
 - 离线验收：`pilot.py inspect/image/--restore` 往返通过；WSL 主机侧两机型 DSO 导出符号与四种机型组合的运行时护栏全部验证；工具与刷写入口测试通过（WSL 全绿）；实机刷写与加载未验收。
+- **SD 卡清单改名为 `/pilot/modules.txt`**：相机 Fsys 校验扩展名，`.json` 一律返回 `0x80000041`（参数非法），而 `.txt`/`.so` 可读（A7C II 2.01 实测，见 `docs/USAGE.md`）。内容仍是 JSON；`pilot.h` 新增 `PILOT_MANIFEST_NAME` 与 `PILOT_MODULE_CONFIG_NAME`（模块配置同步改为 `/pilot/modules/<名>/config.txt`）。旧版加载器把该错误当成"可选功能不可用"静默禁用整套模块且不写日志，是"模块装了但菜单里没有"的实际原因。
+- `tools/pilot.py modules deploy/list/logs` 改读 `modules.txt`，卡上遗留的 `modules.json` 仍会读取并在下次部署时迁移（同时写入两个文件）。
+- **A7C II 支持两种在役来源（原厂 / FL23）**：新增 `patch/on_camera_profiles.py`，`patch.json` 的 `target` 可用 `accepted_sources` 按 `profile` 登记多份 `binary_sha256`/`patched_binary_sha256`；安装器与 `--check` 按整镜像哈希判定来源并打印 `profile=stock|fl23`，未登记镜像仍被拒绝。公开的 `patch.a7c2.json` 已登记 `stock`（`2ea02f7e…`→`48da7988…`）与 `fl23`（`1aaeb8fb…`→`cee59303…`）。
+- FL23 是 A7C II 2.01 的 FL2/FL3 Creative Look 移植，对 `appFw.so` 的 8 处原地改写与 MenuUI 校验的全部地址零重叠，因此同一套补丁窗口与同一份模块在两种来源上都成立；`modules/menu_ui/tests/verify_a7c2_offsets.py` 先按哈希认来源，两份镜像各 120 项全通过，并新增 `--allow-unknown-source`。
+- MenuUI 的 A7C II 后端在安装时对 FL23 的 8 个窗口做 FNV-1a 64 指纹，日志记 `appFw source profile=stock|fl23`；指纹不符只告警，逐站点契约校验仍是闸门。指纹常量由 `work/menu_ui_a7c2/fl23_signature.py` 推导并可回读头文件自检。
 
 ## v0.1.1（2026-11-22）
 

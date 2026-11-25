@@ -437,11 +437,12 @@ static int read_pilot_file_fsys(const char *path, char *buf, size_t cap)
     return total > 0;
 }
 
-static int read_modules_json_fsys(char *buf, size_t cap)
+static int read_manifest_fsys(char *buf, size_t cap)
 {
     char path[64];
     ensure_pilot_drive_letter();
-    snprintf(path, sizeof(path), "%c:/pilot/modules.json", g_pilot_drive_letter);
+    snprintf(path, sizeof(path), "%c:/pilot/%s", g_pilot_drive_letter,
+             PILOT_MANIFEST_NAME);
     return read_pilot_file_fsys(path, buf, cap);
 }
 
@@ -483,8 +484,8 @@ static int read_module_title_fsys(const char *module_name, char *out, size_t cap
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
         if (!names[i] || !names[i][0])
             continue;
-        snprintf(path, sizeof(path), "%c:/pilot/modules/%.63s/config.json",
-                 g_pilot_drive_letter, names[i]);
+        snprintf(path, sizeof(path), "%c:/pilot/modules/%.63s/%s",
+                 g_pilot_drive_letter, names[i], PILOT_MODULE_CONFIG_NAME);
         if (read_title_from_config_path(path, out, cap))
             return 1;
     }
@@ -494,7 +495,7 @@ static int read_module_title_fsys(const char *module_name, char *out, size_t cap
 static void load_menu_title_from_config(void)
 {
     /* Root/entry title is fixed to "Pilot"; module item titles come from each
-     * module's config.json in build_root_page(). */
+     * module's PILOT_MODULE_CONFIG_NAME in build_root_page(). */
     snprintf(g_menu_title, sizeof(g_menu_title), "%s", PILOT_MENU_TITLE_DEFAULT);
     g_pilot_root_page.title = g_menu_title;
 }
@@ -569,7 +570,7 @@ static const PilotUiPage *build_root_page(void *user)
 {
     (void)user;
     char json[2048];
-    if (read_modules_json_fsys(json, sizeof(json)))
+    if (read_manifest_fsys(json, sizeof(json)))
         parse_modules_json(json);
     else
         g_mod_count = 0;

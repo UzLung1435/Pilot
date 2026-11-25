@@ -472,6 +472,62 @@ static int find_libobj_cb(struct dl_phdr_info *info, size_t size, void *data) {
     *(uintptr_t *)data = (uintptr_t)info->dlpi_addr;
     return 1;
 }
+
+/* --- source variant ------------------------------------------------------
+ *
+ * Addresses below PT_LOAD[1] (0x51a7718) are file offsets; the eight FL23
+ * regions all live there except the two look-table flags, which are recorded as
+ * file offsets too, hence the +0x10000 applied by virtual_address(). */
+static const struct {
+    uintptr_t va;
+    unsigned int size;
+} source_windows[] = {
+    {0x03528804ul, 112},
+    {0x04b2ed19ul, 2},
+    {0x04b3b544ul, 4},
+    {0x04b3b54cul, 4},
+    {0x04b4a5e4ul, 4},
+    {0x04b4a5ecul, 4},
+    {0x059992caul, 2},
+    {0x05999382ul, 2},
+};
+
+static int source_signature(uint64_t *out) {
+    uint64_t digest = 0xcbf29ce484222325ull;
+    for (unsigned int i = 0; i < sizeof source_windows / sizeof source_windows[0]; ++i) {
+        uintptr_t address = base + source_windows[i].va;
+        if (protection(address, source_windows[i].size) < 0)
+            return -1;
+        const volatile unsigned char *bytes = (const volatile unsigned char *)address;
+        for (unsigned int b = 0; b < source_windows[i].size; ++b) {
+            digest ^= bytes[b];
+            digest *= 0x100000001b3ull;
+        }
+    }
+    *out = digest;
+    return 0;
+}
+
+static const char *source_profile_name(unsigned int profile) {
+    if (profile == PILOT_A7C2_SOURCE_STOCK)
+        return "stock";
+    if (profile == PILOT_A7C2_SOURCE_FL23)
+        return "fl23";
+    return "unknown";
+}
+
+static unsigned int source_profile(uint64_t *signature) {
+    if (source_signature(signature) != 0) {
+        *signature = 0;
+        return PILOT_A7C2_SOURCE_UNKNOWN;
+    }
+    if (*signature == PILOT_A7C2_SOURCE_SIG_STOCK)
+        return PILOT_A7C2_SOURCE_STOCK;
+    if (*signature == PILOT_A7C2_SOURCE_SIG_FL23)
+        return PILOT_A7C2_SOURCE_FL23;
+    return PILOT_A7C2_SOURCE_UNKNOWN;
+}
+
 static int pilot_install(void) {
     if (!g_api)
         return -1;
@@ -486,6 +542,13 @@ static int pilot_install(void) {
         return -1;
     }
     pilot_menu_observation.appfw_base = base;
+    uint64_t signature = 0;
+    unsigned int profile = source_profile(&signature);
+    if (profile == PILOT_A7C2_SOURCE_UNKNOWN)
+        trace("PILOT_MENU_WARN ", "appFw source 0x%llx is not a recorded image; contract checks decide",
+              (unsigned long long)signature);
+    else
+        trace("PILOT_MENU_INFO ", "appFw source profile=%s", source_profile_name(profile));
     original_alias = (alias_fn)(base + F_ALIAS);
     original_normal = (normal_fn)(base + F_NORMAL);
     original_reverse = (reverse_fn)(base + F_REVERSE);
@@ -577,7 +640,8 @@ static int pilot_install(void) {
     }
     pilot_menu_observation.installed = 1;
     pilot_menu_observation.patches = patch_count;
-    trace("PILOT_MENU_READY ", "patches=%u item=%#x template=%#x list=0x%x abi=%u", patch_count, NEW_ITEM,
-          INFO_SCREEN, PILOT_LIST_SCREEN, (unsigned)PILOT_ABI_VERSION);
+    trace("PILOT_MENU_READY ", "patches=%u item=%#x template=%#x list=0x%x abi=%u profile=%s", patch_count,
+          NEW_ITEM, INFO_SCREEN, PILOT_LIST_SCREEN, (unsigned)PILOT_ABI_VERSION,
+          source_profile_name(profile));
     return 0;
 }
