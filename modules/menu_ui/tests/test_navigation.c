@@ -64,6 +64,94 @@ static PilotStatus test_patch(uintptr_t address, const void *expected,
     memcpy((void *)address, replacement, size);
     return PILOT_STATUS_OK;
 }
+static unsigned test_orig_1c3_confirms;
+static unsigned test_1c3_view_updates;
+static char test_last_toggle_str[64];
+static char test_last_action_str[64];
+static char test_last_status_str[160];
+static char test_last_slot1_str[512];
+static int test_toggle_sprite_dummy;
+static int test_action_sprite_dummy;
+static int test_status_sprite_dummy;
+static int test_slot1_sprite_dummy;
+static uint8_t test_1c3_view[0x980];
+static char test_written_path[128];
+static char test_written_json[2048];
+static size_t test_written_len;
+static int test_fsys_fail_write;
+static int test_fsys_flushed;
+static int test_fsys_handle_dummy;
+
+__attribute__((visibility("default")))
+int Fsys_Open(const char *path, void **handle_out, int flags)
+{
+    if (test_fsys_fail_write || flags != 0xE)
+        return -1;
+    snprintf(test_written_path, sizeof(test_written_path), "%s", path ? path : "");
+    test_written_len = 0;
+    test_written_json[0] = '\0';
+    test_fsys_flushed = 0;
+    *handle_out = &test_fsys_handle_dummy;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int Fsys_Write(void *handle, const void *buf, size_t len)
+{
+    if (handle != &test_fsys_handle_dummy || test_written_len + len >= sizeof(test_written_json))
+        return -1;
+    memcpy(test_written_json + test_written_len, buf, len);
+    test_written_len += len;
+    test_written_json[test_written_len] = '\0';
+    return (int)len;
+}
+
+__attribute__((visibility("default")))
+int Fsys_Flush(void *handle)
+{
+    if (handle != &test_fsys_handle_dummy)
+        return -1;
+    test_fsys_flushed = 1;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int Fsys_Close(void *handle)
+{
+    return (handle == &test_fsys_handle_dummy) ? 0 : -1;
+}
+
+static uint32_t fake_orig_1c3_confirm(void *ctrl, void *ev)
+{
+    (void)ctrl; (void)ev;
+    ++test_orig_1c3_confirms;
+    return 1u;
+}
+static void fake_orig_1c3_view_update(void *view, uint32_t flag)
+{
+    (void)view; (void)flag;
+    ++test_1c3_view_updates;
+}
+static void fake_set_string_cstr(void *sprite, const char *str)
+{
+    if (sprite == &test_toggle_sprite_dummy)
+        snprintf(test_last_toggle_str, sizeof(test_last_toggle_str), "%s", str ? str : "");
+    else if (sprite == &test_action_sprite_dummy)
+        snprintf(test_last_action_str, sizeof(test_last_action_str), "%s", str ? str : "");
+    else if (sprite == &test_status_sprite_dummy)
+        snprintf(test_last_status_str, sizeof(test_last_status_str), "%s", str ? str : "");
+    else if (sprite == &test_slot1_sprite_dummy)
+        snprintf(test_last_slot1_str, sizeof(test_last_slot1_str), "%s", str ? str : "");
+}
+
+static unsigned test_opt_callbacks;
+static void test_opt_on_change(PilotUiOption *opt, void *user)
+{
+    (void)opt;
+    (void)user;
+    ++test_opt_callbacks;
+}
+
 static void *detail_factory(void *buf, void *a1, void *a2, void *a3, uint32_t a4)
 {
     (void)buf; (void)a1; (void)a2; (void)a3; (void)a4;
@@ -156,7 +244,129 @@ int main(void)
     test_patch_failure = 1;
     assert(pilot_1c3_ctrl_factory_hook(NULL, NULL, NULL, NULL, 0) == NULL);
     assert(test_detail_factories == 1u);
+
+    /* Validate module [_ON]/[OFF] labels, description, and detail toggle shell. */
+    test_patch_failure = 0;
+    g_mods_loaded = 0;
+    parse_modules_json("{\"modules\":{\"pilot_menu_ui.so\":true,\"pilot_6k.so\":false}}");
+    assert(g_mod_count == 2u && g_mod_enabled[0] == 1 && g_mod_enabled[1] == 0);
+    snprintf(g_mod_titles[0], sizeof(g_mod_titles[0]), "Menu UI");
+    snprintf(g_mod_titles[1], sizeof(g_mod_titles[1]), "6K Mode");
+    snprintf(g_mod_desc_bufs[0], sizeof(g_mod_desc_bufs[0]), "Pilot menu");
+    snprintf(g_mod_desc_bufs[1], sizeof(g_mod_desc_bufs[1]), "6K oversample");
+    g_mods_loaded = 1;
+    const PilotUiPage *root = build_root_page(NULL);
+    assert(root->component_count == 3u);
+    assert(strcmp(root->components[1].label, "Menu UI") == 0);
+    assert(strcmp(root->components[1].value, "开") == 0);
+    assert(strcmp(root->components[2].label, "6K Mode") == 0);
+    assert(strcmp(root->components[2].value, "关") == 0);
+
+    bind_detail_page_to_layout(&g_modules_detail_pages[1]);
+    assert(g_detail_has_toggle == 1 && g_detail_module_index == 1);
+    assert(*(uintptr_t *)(g_ctrl_items_1c3 + 7u * APPFW_CTRL_ITEM_SIZE) == 0x8343DB0u);
+    assert(*(int32_t *)(g_layout_1c3 + 7u * APPFW_LAYOUT_ITEM_SIZE + 0x24u) == 288);
+    assert(*(int32_t *)(g_ctrl_items_1c3 + 7u * APPFW_CTRL_ITEM_SIZE + 0x10u) == 288);
+    assert(*(uint32_t *)(g_layout_1c3 + 12u * APPFW_LAYOUT_ITEM_SIZE + 0x34u) ==
+           PILOT_RID_DETAIL_TOGGLE);
+
+    g_pilot_detail_active = 1;
+    g_active_1c3_view = test_1c3_view;
+    g_orig_1c3_confirm = fake_orig_1c3_confirm;
+    g_orig_view_update_1c3 = fake_orig_1c3_view_update;
+    g_orig_set_string_cstr = fake_set_string_cstr;
+    pilot_set_string_rid_hook(&test_toggle_sprite_dummy, PILOT_RID_DETAIL_TOGGLE);
+    pilot_set_string_rid_hook(&test_status_sprite_dummy, PILOT_RID_SLOT_BASE);
+    assert(strcmp(test_last_toggle_str, "模块开关: [OFF]") == 0);
+
+    test_index = 7u;
+    assert(pilot_1c3_confirm_hook(test_ctrl, NULL) == 1u);
+    assert(test_orig_1c3_confirms == 0u);
+    assert(g_mod_enabled[1] == 1);
+    assert(test_fsys_flushed == 1);
+    assert(strcmp(test_written_path, "A:/pilot/modules.json") == 0);
+    assert(strstr(test_written_json, "\"pilot_menu_ui.so\": true") != NULL);
+    assert(strstr(test_written_json, "\"pilot_6k.so\": true") != NULL);
+    assert(strcmp(test_last_toggle_str, "模块开关: [_ON]") == 0);
+    assert(strcmp(g_root_components[2].value, "开") == 0);
+    assert(test_1c3_view_updates == 1u);
+
+    /* Write failure must revert in-memory toggle state. */
+    test_fsys_fail_write = 1;
+    assert(pilot_1c3_confirm_hook(test_ctrl, NULL) == 1u);
+    assert(g_mod_enabled[1] == 1);
+    test_fsys_fail_write = 0;
+
+    test_index = 8u;
+    assert(pilot_1c3_confirm_hook(test_ctrl, NULL) == 1u);
+    assert(test_orig_1c3_confirms == 1u);
+
+    /* Validate UTF-8 visual-width truncation for list labels. */
+    char trunc_buf[80];
+    format_list_label_truncated(trunc_buf, sizeof(trunc_buf), "[_ON] ", "3k_opengate", 20u);
+    assert(strcmp(trunc_buf, "[_ON] 3k_opengate") == 0);
+    format_list_label_truncated(trunc_buf, sizeof(trunc_buf), "[OFF] ", "hs6k30_6k_ddrcd_ippp_extra", 20u);
+    assert(strcmp(trunc_buf, "[OFF] hs6k30_6k_ddrcd_ip..") == 0);
+    format_list_label_truncated(trunc_buf, sizeof(trunc_buf), "[_ON] ", "超级长中文模块名称测试溢出", 20u);
+    assert(strcmp(trunc_buf, "[_ON] 超级长中文模块名称..") == 0);
+
+    /* Validate per-module native 0x293 option sublist. */
+    static const char *const test_modes[] = {"3:2", "16:9", "4:3"};
+    static PilotUiOption test_opts[3] = {
+        {.label = "Test Toggle", .kind = PILOT_UI_OPT_BOOL, .value = 0, .on_change = test_opt_on_change},
+        {.label = "Aspect Mode", .kind = PILOT_UI_OPT_ENUM, .value = 0, .choices = test_modes, .choice_count = 3, .on_change = test_opt_on_change},
+        {.label = "Ping Action", .kind = PILOT_UI_OPT_ACTION, .value = 0, .action_text = "Run", .on_change = test_opt_on_change},
+    };
+    assert(pilot_ui_register_options_v1("pilot_6k.so", test_opts, 3u) == PILOT_STATUS_OK);
+    root = build_root_page(NULL);
+    assert(root->components[2].target_page == &g_mod_opt_pages[1]);
+
+    g_pending_list_page = &g_mod_opt_pages[1];
+    pilot_apply_pending_list_page();
+    assert(g_active_page == &g_mod_opt_pages[1] && g_page_stack_depth == 1);
+    assert(g_active_page->component_count == 4u);
+    assert(strcmp(g_list_strings[0], "Test Toggle") == 0);
+    assert(strcmp(g_list_val_strings[0], "关") == 0);
+    assert(strcmp(g_list_strings[1], "Aspect Mode") == 0);
+    assert(strcmp(g_list_val_strings[1], "3:2") == 0);
+    assert(strcmp(g_list_strings[2], "Ping Action") == 0);
+    assert(strcmp(g_list_val_strings[2], "Run (0)") == 0);
+    assert(strcmp(g_list_strings[3], "模块信息与开关") == 0);
+    assert(strcmp(g_list_val_strings[3], "开") == 0);
+
+    pilot_set_string_rid_hook(&test_slot1_sprite_dummy, PILOT_RID_LIST_VAL_BASE + 0u);
+    assert(pilot_handle_opt_list_click(test_ctrl, 0u) == 1);
+    assert(test_opts[0].value == 1 && test_opt_callbacks == 1u);
+    assert(strcmp(test_last_slot1_str, "开") == 0);
+
+    pilot_set_string_rid_hook(&test_slot1_sprite_dummy, PILOT_RID_LIST_VAL_BASE + 1u);
+    assert(pilot_handle_opt_list_click(test_ctrl, 1u) == 1);
+    assert(test_opts[1].value == 1 && test_opt_callbacks == 2u);
+    assert(strcmp(test_last_slot1_str, "16:9") == 0);
+
+    pilot_set_string_rid_hook(&test_slot1_sprite_dummy, PILOT_RID_LIST_VAL_BASE + 2u);
+    assert(pilot_handle_opt_list_click(test_ctrl, 2u) == 1);
+    assert(test_opts[2].value == 1 && test_opt_callbacks == 3u);
+    assert(strcmp(test_last_slot1_str, "Run (1)") == 0);
+
+    /* 模块信息与开关 falls through (returns 0) so generic_open opens 0x1C3. */
+    assert(pilot_handle_opt_list_click(test_ctrl, 3u) == 0);
+
+    /* Validate 0x2A7 native option picker descriptor & selection callback. */
+    pilot_2a7_prepare_choices("Aspect Mode", test_modes, 3u, 1u);
+    assert(pilot_acc_get_group_desc_hook(NULL, PILOT_OPT_GROUP_ID) == g_opt_setting_desc);
+    assert(*(uint32_t *)(g_opt_setting_desc + 0x40ull) == 3u);
+    assert(pilot_acc_get_setting_val_hook(NULL, PILOT_OPT_GROUP_ID) == 1u);
+    assert(pilot_acc_is_row_visible_hook(NULL, PILOT_OPT_CHOICE_KEY_BASE + 2u) == 1u);
+    assert(pilot_acc_is_row_visible_hook(NULL, PILOT_OPT_CHOICE_KEY_BASE + 3u) == 0u);
+    assert(pilot_acc_item_to_group_hook(NULL, PILOT_OPT_CHOICE_KEY_BASE + 2u) == PILOT_OPT_GROUP_ID);
+    g_pilot_2a7_mod_idx = 1u;
+    g_pilot_2a7_row_idx = 1u;
+    pilot_2a7_apply_selection(2u); /* choose "4:3" */
+    assert(test_opts[1].value == 2 && test_opt_callbacks == 4u);
+    assert(strcmp(g_list_val_strings[1], "4:3") == 0);
+
     munmap(mapping, 0x5000000);
-    puts("PASS navigation lifecycle, repeated returns, native pass-through, focus diagnostics, patch errors");
+    puts("PASS navigation lifecycle, repeated returns, native pass-through, focus diagnostics, patch errors, toggle shell");
     return 0;
 }

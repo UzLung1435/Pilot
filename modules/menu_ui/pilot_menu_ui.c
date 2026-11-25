@@ -8,11 +8,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 PILOT_DECLARE_MODULE_MODEL();
 
 #define PILOT_MENU_TITLE_DEFAULT "Pilot"
-#define PILOT_UI_VERSION_STRING "Pilot v0.1.1"
 #define PILOT_UI_DESC_STRING \
     "An a6700 Firmware AP module trying to provide\n" \
     "an auto reload RAM Patch framework without\n" \
@@ -28,6 +29,8 @@ PILOT_DECLARE_MODULE_MODEL();
 
 #define PILOT_RID_MENU_LABEL 0x02FFFF00u
 #define PILOT_RID_PAGE_TITLE 0x02FFFF01u
+#define PILOT_RID_DETAIL_TOGGLE 0x02FFFF02u
+#define PILOT_RID_DETAIL_ACTION 0x02FFFF03u
 #define PILOT_RID_SLOT_BASE 0x02FFFF10u
 #define PILOT_RID_LIST_ITEM_BASE 0x02FFFF20u
 #define PILOT_RID_SUBITEM_BASE 0x02FFFF40u
@@ -86,6 +89,8 @@ PILOT_DECLARE_MODULE_MODEL();
 #define APPFW_GOT_BTN_RIGHT   0x4E49748ull /* -> 0x29eb148 */
 #define APPFW_GOT_BTN_LEFT    0x4E548D0ull /* -> 0x29eb0c8 */
 #define APPFW_GOT_BTN_BACK    0x4E666F8ull /* -> 0x29ebb1c */
+#define APPFW_GOT_BTN_BACK2   0x4EDE688ull /* -> 0x29ec030 (wrapper calling 0x29ebb1c directly) */
+#define APPFW_GOT_1C3_CONFIRM 0x4EB0FE0ull /* -> 0x28fc214 (0x1C3 button confirm) */
 #define APPFW_293_GET_FOCUSED_ITEM_OFF 0x29EAAC4ull
 #define APPFW_GET_CUR_GROUP_OFF 0x2F731D8ull
 #define APPFW_GET_SEL_ROW_OFF 0x2F73228ull
@@ -157,10 +162,10 @@ struct tree_reg_entry {
 
 /* ---------- Declarative Pages ---------- */
 
-static const PilotUiComponent g_version_components[] = {
+static PilotUiComponent g_version_components[] = {
     {
         .kind = PILOT_UI_COMP_TEXT,
-        .label = PILOT_UI_VERSION_STRING,
+        .label = NULL,
         .x = 48,
         .y = 82,
         .w = 544,
@@ -185,13 +190,16 @@ static const PilotUiPage g_pilot_version_page = {
 };
 
 static PilotUiComponent g_root_components[PILOT_LIST_ITEMS_MAX];
-static PilotUiComponent g_module_detail_comps[PILOT_LIST_ITEMS_MAX][2];
+static PilotUiComponent g_module_detail_comps[PILOT_LIST_ITEMS_MAX][3];
 static PilotUiPage g_modules_detail_pages[PILOT_LIST_ITEMS_MAX];
 static char g_mod_names[PILOT_LIST_ITEMS_MAX][64];
 static char g_mod_titles[PILOT_LIST_ITEMS_MAX][64];
-static char g_mod_status_bufs[PILOT_LIST_ITEMS_MAX][48];
-static char g_mod_path_bufs[PILOT_LIST_ITEMS_MAX][96];
+static char g_mod_list_labels[PILOT_LIST_ITEMS_MAX][80];
+static char g_mod_status_bufs[PILOT_LIST_ITEMS_MAX][160];
+static char g_mod_desc_bufs[PILOT_LIST_ITEMS_MAX][256];
+static char g_mod_toggle_bufs[PILOT_LIST_ITEMS_MAX][48];
 static int g_mod_enabled[PILOT_LIST_ITEMS_MAX];
+static int g_mods_loaded;
 static size_t g_mod_count;
 static char g_pilot_drive_letter = 'A';
 static char g_menu_title[64] = PILOT_MENU_TITLE_DEFAULT;
@@ -230,6 +238,29 @@ static const char *g_list_strings[PILOT_LIST_ITEMS_MAX];
 static const char *g_subitem_strings[PILOT_LIST_ITEMS_MAX];
 static const PilotUiPage *g_detail_page = &g_pilot_version_page;
 static int g_pilot_detail_active;
+static int g_detail_has_toggle;
+static int g_detail_module_index = -1;
+static uint32_t g_saved_root_item = PILOT_ITEM_ID_BASE;
+static const char *g_toggle_string = "";
+static void *g_active_1c3_view;
+static void *g_toggle_text_sprite;
+static void *g_status_text_sprite;
+static void *g_list_item_sprites[PILOT_LIST_ITEMS_MAX];
+
+typedef struct {
+    char module_name[64];
+    PilotUiOption *options;
+    size_t count;
+} PilotModOptReg;
+
+static PilotModOptReg g_opt_registry[PILOT_LIST_ITEMS_MAX];
+static size_t g_opt_registry_count;
+static PilotUiPage g_mod_opt_pages[PILOT_LIST_ITEMS_MAX];
+static PilotUiComponent g_mod_opt_comps[PILOT_LIST_ITEMS_MAX][PILOT_LIST_ITEMS_MAX];
+static char g_mod_opt_labels[PILOT_LIST_ITEMS_MAX][PILOT_LIST_ITEMS_MAX][80];
+static char g_mod_opt_values[PILOT_LIST_ITEMS_MAX][PILOT_LIST_ITEMS_MAX][48];
+
+static void pilot_apply_pending_list_page(void);
 
 static uint8_t g_menu_table[APPFW_MENU_TABLE_SIZE] __attribute__((aligned(16)));
 static uint8_t g_desc[APPFW_DESC_SIZE + PILOT_LIST_ITEMS_MAX * APPFW_ITEM_ENTRY_SIZE]
@@ -280,6 +311,7 @@ static int g_view_vtable_293_ready;
 static ctrl_factory_fn g_orig_ctrl_factory_1c3;
 static view_factory_fn g_orig_view_factory_1c3;
 static view_update_fn g_orig_view_update_1c3;
+static ctrl_factory_fn g_orig_ctrl_factory_292;
 static ctrl_factory_fn g_orig_ctrl_factory_293;
 static view_factory_fn g_orig_view_factory_293;
 static view_update_fn g_orig_view_update_293;
@@ -287,6 +319,8 @@ static ctrl_event_fn g_orig_btn_confirm;
 static ctrl_event_fn g_orig_btn_right;
 static ctrl_event_fn g_orig_btn_left;
 static ctrl_event_fn g_orig_btn_back;
+static ctrl_event_fn g_orig_btn_back2;
+static ctrl_event_fn g_orig_1c3_confirm;
 static text_set_rid_fn g_orig_set_string_rid;
 static text_set_cstr_fn g_orig_set_string_cstr;
 
@@ -331,6 +365,9 @@ static PilotStatus read_appfw_bytes(uintptr_t addr, void *out, size_t len)
     return PILOT_STATUS_OK;
 }
 
+#include "pilot_ui_option_2a7.inc"
+#include "pilot_ui_busy_260.inc"
+
 static void hide_layout_item(uint8_t *layout, uint32_t index)
 {
     uint8_t *item = layout + (size_t)index * APPFW_LAYOUT_ITEM_SIZE;
@@ -360,6 +397,16 @@ static void set_layout_item_rect(uint8_t *layout, uint32_t index, int32_t x,
     *(int32_t *)(item + 0x2Cu) = h;
 }
 
+static void set_ctrl_item_rect(uint8_t *ctrl_items, uint32_t index, int32_t x,
+                               int32_t y, int32_t w, int32_t h)
+{
+    uint8_t *item = ctrl_items + (size_t)index * APPFW_CTRL_ITEM_SIZE;
+    *(int32_t *)(item + 0x0Cu) = x;
+    *(int32_t *)(item + 0x10u) = y;
+    *(int32_t *)(item + 0x14u) = w;
+    *(int32_t *)(item + 0x18u) = h;
+}
+
 static const PilotUiPage *resolve_page(const PilotUiPage *page)
 {
     if (page && page->build_dynamic) {
@@ -386,8 +433,10 @@ static const char *parse_json_str(const char *p, char *out, size_t cap)
     size_t n = 0;
     while (*p && *p != '"') {
         char ch = *p++;
-        if (ch == '\\' && *p)
-            ch = *p++;
+        if (ch == '\\' && *p) {
+            char esc = *p++;
+            ch = (esc == 'n') ? '\n' : (esc == 't') ? '\t' : esc;
+        }
         if (n + 1 < cap)
             out[n++] = ch;
     }
@@ -437,6 +486,79 @@ static int read_pilot_file_fsys(const char *path, char *buf, size_t cap)
     return total > 0;
 }
 
+static int format_modules_json(char *out, size_t cap)
+{
+    if (!out || cap < 32u || g_mod_count == 0u)
+        return 0;
+    size_t pos = 0;
+    int n = snprintf(out, cap, "{\n  \"modules\": {\n");
+    if (n <= 0 || (size_t)n >= cap)
+        return 0;
+    pos = (size_t)n;
+    for (size_t i = 0; i < g_mod_count; ++i) {
+        n = snprintf(out + pos, cap - pos, "    \"%s\": %s%s\n",
+                     g_mod_names[i],
+                     g_mod_enabled[i] ? "true" : "false",
+                     (i + 1u < g_mod_count) ? "," : "");
+        if (n <= 0 || (size_t)n >= cap - pos)
+            return 0;
+        pos += (size_t)n;
+    }
+    n = snprintf(out + pos, cap - pos, "  }\n}\n");
+    if (n <= 0 || (size_t)n >= cap - pos)
+        return 0;
+    return 1;
+}
+
+static int write_pilot_file_fsys(const char *path, const char *data, size_t len)
+{
+    if (!path || (!data && len))
+        return 0;
+
+    typedef int (*fsys_open_fn)(const char *, void **, int);
+    typedef int (*fsys_write_fn)(void *, const void *, size_t);
+    typedef int (*fsys_flush_fn)(void *);
+    typedef int (*fsys_close_fn)(void *);
+    fsys_open_fn f_open = (fsys_open_fn)dlsym(RTLD_DEFAULT, "Fsys_Open");
+    fsys_write_fn f_write = (fsys_write_fn)dlsym(RTLD_DEFAULT, "Fsys_Write");
+    fsys_flush_fn f_flush = (fsys_flush_fn)dlsym(RTLD_DEFAULT, "Fsys_Flush");
+    fsys_close_fn f_close = (fsys_close_fn)dlsym(RTLD_DEFAULT, "Fsys_Close");
+    if (!f_open || !f_write || !f_flush || !f_close)
+        return 0;
+
+    void *h = NULL;
+    if (f_open(path, &h, 0xE) != 0 || !h)
+        return 0;
+
+    int ok = 1;
+    size_t written_total = 0;
+    while (written_total < len) {
+        int n = f_write(h, data + written_total, len - written_total);
+        if (n <= 0 || (size_t)n > len - written_total) {
+            ok = 0;
+            break;
+        }
+        written_total += (size_t)n;
+    }
+    if (ok && f_flush(h) != 0)
+        ok = 0;
+    if (f_close(h) != 0)
+        ok = 0;
+    return ok;
+}
+
+static int write_manifest_fsys(void)
+{
+    char json[2048];
+    if (!format_modules_json(json, sizeof(json)))
+        return 0;
+    char path[64];
+    ensure_pilot_drive_letter();
+    snprintf(path, sizeof(path), "%c:/pilot/%s", g_pilot_drive_letter,
+             PILOT_MANIFEST_NAME);
+    return write_pilot_file_fsys(path, json, strlen(json));
+}
+
 static int read_manifest_fsys(char *buf, size_t cap)
 {
     char path[64];
@@ -446,15 +568,19 @@ static int read_manifest_fsys(char *buf, size_t cap)
     return read_pilot_file_fsys(path, buf, cap);
 }
 
-static int read_title_from_config_path(const char *path, char *out, size_t cap)
+static int read_json_str_field(const char *json, const char *key,
+                               char *out, size_t cap)
 {
-    char json[1024];
-    if (!read_pilot_file_fsys(path, json, sizeof(json)))
+    if (!json || !key || !out || cap < 2)
         return 0;
-    const char *p = strstr(json, "\"title\"");
+    char needle[48];
+    int n = snprintf(needle, sizeof(needle), "\"%s\"", key);
+    if (n <= 0 || (size_t)n >= sizeof(needle))
+        return 0;
+    const char *p = strstr(json, needle);
     if (!p)
         return 0;
-    p = strchr(p + 7, ':');
+    p = strchr(p + n, ':');
     if (!p)
         return 0;
     if (parse_json_str(p + 1, out, cap) && out[0])
@@ -463,11 +589,16 @@ static int read_title_from_config_path(const char *path, char *out, size_t cap)
     return 0;
 }
 
-static int read_module_title_fsys(const char *module_name, char *out, size_t cap)
+static void read_module_meta_fsys(const char *module_name,
+                                  char *title_out, size_t title_cap,
+                                  char *desc_out, size_t desc_cap)
 {
-    if (!module_name || !out || cap < 2)
-        return 0;
-    out[0] = '\0';
+    if (title_out && title_cap)
+        title_out[0] = '\0';
+    if (desc_out && desc_cap)
+        desc_out[0] = '\0';
+    if (!module_name)
+        return;
 
     char base[64];
     snprintf(base, sizeof(base), "%.63s", module_name);
@@ -481,15 +612,22 @@ static int read_module_title_fsys(const char *module_name, char *out, size_t cap
 
     const char *names[] = {module_name, base, base_no_pilot};
     char path[192];
+    char json[1024];
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
         if (!names[i] || !names[i][0])
             continue;
         snprintf(path, sizeof(path), "%c:/pilot/modules/%.63s/%s",
                  g_pilot_drive_letter, names[i], PILOT_MODULE_CONFIG_NAME);
-        if (read_title_from_config_path(path, out, cap))
-            return 1;
+        if (!read_pilot_file_fsys(path, json, sizeof(json)))
+            continue;
+        if (title_out && title_cap > 1)
+            (void)read_json_str_field(json, "title", title_out, title_cap);
+        if (desc_out && desc_cap > 1) {
+            if (!read_json_str_field(json, "description", desc_out, desc_cap))
+                (void)read_json_str_field(json, "desc", desc_out, desc_cap);
+        }
+        return;
     }
-    return 0;
 }
 
 static void load_menu_title_from_config(void)
@@ -566,19 +704,138 @@ static void parse_modules_json(const char *json)
     }
 }
 
+static void format_default_module_title(const char *module_name,
+                                        char *out, size_t cap)
+{
+    if (!module_name || !out || cap < 2)
+        return;
+    const char *start = module_name;
+    if (strncmp(start, "pilot_", 6) == 0 && start[6] != '\0')
+        start += 6;
+    snprintf(out, cap, "%.63s", start);
+    size_t len = strlen(out);
+    if (len > 3 && strcmp(out + len - 3, ".so") == 0)
+        out[len - 3] = '\0';
+}
+
+#define PILOT_LIST_TITLE_MAX_COLS 20u /* "[_ON] " (6) + 20 = 26 cols */
+
+static size_t utf8_char_len(unsigned char lead)
+{
+    if ((lead & 0x80u) == 0u) return 1u;
+    if ((lead & 0xE0u) == 0xC0u) return 2u;
+    if ((lead & 0xF0u) == 0xE0u) return 3u;
+    if ((lead & 0xF8u) == 0xF0u) return 4u;
+    return 1u;
+}
+
+static size_t utf8_measure_cols(const char *s)
+{
+    size_t cols = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (p && *p) {
+        size_t n = utf8_char_len(*p);
+        cols += (n == 1u) ? 1u : 2u;
+        for (size_t k = 0; k < n && *p; ++k)
+            ++p;
+    }
+    return cols;
+}
+
+static void format_list_label_truncated(char *dst, size_t cap,
+                                        const char *prefix,
+                                        const char *title,
+                                        size_t max_title_cols)
+{
+    if (!dst || cap == 0)
+        return;
+    size_t pos = 0;
+    if (prefix) {
+        int n = snprintf(dst, cap, "%s", prefix);
+        if (n > 0)
+            pos = ((size_t)n < cap) ? (size_t)n : (cap - 1u);
+    }
+    if (!title || pos + 1u >= cap) {
+        dst[pos] = '\0';
+        return;
+    }
+
+    int need_ellipsis = (utf8_measure_cols(title) > max_title_cols);
+    size_t budget = need_ellipsis && max_title_cols > 2u
+                        ? (max_title_cols - 2u)
+                        : max_title_cols;
+    size_t cols = 0;
+    const unsigned char *p = (const unsigned char *)title;
+    while (*p) {
+        size_t n = utf8_char_len(*p);
+        size_t avail = 0;
+        while (avail < n && p[avail])
+            ++avail;
+        size_t w = (avail == 1u) ? 1u : 2u;
+        if (cols + w > budget)
+            break;
+        if (pos + avail + (need_ellipsis ? 2u : 0u) + 1u > cap)
+            break;
+        memcpy(dst + pos, p, avail);
+        pos += avail;
+        cols += w;
+        p += avail;
+    }
+    if (need_ellipsis && pos + 3u <= cap) {
+        dst[pos++] = '.';
+        dst[pos++] = '.';
+    }
+    dst[pos] = '\0';
+}
+
+static void refresh_module_ui_strings(size_t i)
+{
+    if (i >= PILOT_LIST_ITEMS_MAX)
+        return;
+    const char *tag = g_mod_enabled[i] ? "[_ON]" : "[OFF]";
+    format_list_label_truncated(g_mod_list_labels[i],
+                                sizeof(g_mod_list_labels[i]),
+                                NULL, g_mod_titles[i],
+                                PILOT_LIST_TITLE_MAX_COLS);
+    snprintf(g_mod_status_bufs[i], sizeof(g_mod_status_bufs[i]),
+             "Status: %s\nPath: %c:/pilot/%.63s",
+             g_mod_enabled[i] ? "Enabled" : "Disabled",
+             g_pilot_drive_letter, g_mod_names[i]);
+    snprintf(g_mod_toggle_bufs[i], sizeof(g_mod_toggle_bufs[i]),
+             "模块开关: %s", tag);
+}
+
+static PilotModOptReg *find_module_opt_reg(const char *module_name);
+static const PilotUiPage *build_module_opt_list_page(void *user);
+
 static const PilotUiPage *build_root_page(void *user)
 {
     (void)user;
-    char json[2048];
-    if (read_manifest_fsys(json, sizeof(json)))
-        parse_modules_json(json);
-    else
-        g_mod_count = 0;
+    if (!g_mods_loaded) {
+        char json[2048];
+        if (read_manifest_fsys(json, sizeof(json)))
+            parse_modules_json(json);
+        else
+            g_mod_count = 0;
 
-    if (g_mod_count == 0) {
-        snprintf(g_mod_names[0], sizeof(g_mod_names[0]), "pilot_menu_ui.so");
-        g_mod_enabled[0] = 1;
-        g_mod_count = 1;
+        if (g_mod_count == 0) {
+            snprintf(g_mod_names[0], sizeof(g_mod_names[0]), "pilot_menu_ui.so");
+            g_mod_enabled[0] = 1;
+            g_mod_count = 1;
+        }
+        for (size_t i = 0; i < g_mod_count; ++i) {
+            read_module_meta_fsys(g_mod_names[i],
+                                  g_mod_titles[i], sizeof(g_mod_titles[i]),
+                                  g_mod_desc_bufs[i], sizeof(g_mod_desc_bufs[i]));
+            if (!g_mod_titles[i][0])
+                format_default_module_title(g_mod_names[i],
+                                            g_mod_titles[i],
+                                            sizeof(g_mod_titles[i]));
+            if (!g_mod_desc_bufs[i][0])
+                snprintf(g_mod_desc_bufs[i], sizeof(g_mod_desc_bufs[i]),
+                         "No description.");
+        }
+        g_mods_loaded = 1;
     }
 
     size_t count = 0;
@@ -589,42 +846,55 @@ static const PilotUiPage *build_root_page(void *user)
     };
 
     for (size_t i = 0; i < g_mod_count && count < PILOT_LIST_ITEMS_MAX; ++i) {
-        if (!read_module_title_fsys(g_mod_names[i], g_mod_titles[i],
-                                    sizeof(g_mod_titles[i])))
-            snprintf(g_mod_titles[i], sizeof(g_mod_titles[i]), "%.63s",
-                     g_mod_names[i]);
-
-        snprintf(g_mod_status_bufs[i], sizeof(g_mod_status_bufs[i]),
-                 "Status: %s", g_mod_enabled[i] ? "Enabled" : "Disabled");
-        snprintf(g_mod_path_bufs[i], sizeof(g_mod_path_bufs[i]),
-                 "Path: %c:/pilot/%.63s", g_pilot_drive_letter, g_mod_names[i]);
+        refresh_module_ui_strings(i);
 
         g_module_detail_comps[i][0] = (PilotUiComponent){
             .kind = PILOT_UI_COMP_TEXT,
             .label = g_mod_status_bufs[i],
             .x = 48,
-            .y = 82,
+            .y = 74,
             .w = 544,
-            .h = 42,
+            .h = 72,
         };
         g_module_detail_comps[i][1] = (PilotUiComponent){
             .kind = PILOT_UI_COMP_TEXT,
-            .label = g_mod_path_bufs[i],
+            .label = g_mod_desc_bufs[i],
             .x = 48,
-            .y = 138,
+            .y = 154,
             .w = 544,
             .h = 120,
+        };
+        g_module_detail_comps[i][2] = (PilotUiComponent){
+            .kind = PILOT_UI_COMP_TOGGLE,
+            .label = g_mod_toggle_bufs[i],
+            .x = 179,
+            .y = 288,
+            .w = 282,
+            .h = 54,
         };
         g_modules_detail_pages[i] = (PilotUiPage){
             .kind = PILOT_UI_PAGE_DETAIL,
             .title = g_mod_titles[i],
             .components = g_module_detail_comps[i],
-            .component_count = 2u,
+            .component_count = 3u,
+            .user_data = (void *)(uintptr_t)i,
         };
+        g_mod_opt_pages[i] = (PilotUiPage){
+            .kind = PILOT_UI_PAGE_LIST,
+            .title = g_mod_titles[i],
+            .components = g_mod_opt_comps[i],
+            .component_count = 0u,
+            .build_dynamic = build_module_opt_list_page,
+            .user_data = (void *)(uintptr_t)i,
+        };
+        PilotModOptReg *reg = find_module_opt_reg(g_mod_names[i]);
         g_root_components[count++] = (PilotUiComponent){
             .kind = PILOT_UI_COMP_SUBMENU,
-            .label = g_mod_titles[i],
-            .target_page = &g_modules_detail_pages[i],
+            .label = g_mod_list_labels[i],
+            .value = g_mod_enabled[i] ? "开" : "关",
+            .target_page = (reg && reg->count > 0u)
+                               ? &g_mod_opt_pages[i]
+                               : &g_modules_detail_pages[i],
         };
     }
 
@@ -632,23 +902,173 @@ static const PilotUiPage *build_root_page(void *user)
     return &g_pilot_root_page;
 }
 
+static PilotModOptReg *find_module_opt_reg(const char *module_name)
+{
+    if (!module_name || !module_name[0])
+        return NULL;
+    for (size_t i = 0; i < g_opt_registry_count; ++i) {
+        if (strcmp(g_opt_registry[i].module_name, module_name) == 0)
+            return &g_opt_registry[i];
+    }
+    return NULL;
+}
+
+__attribute__((visibility("default")))
+PilotStatus pilot_ui_register_options_v1(const char *module_name,
+                                         PilotUiOption *options,
+                                         size_t option_count)
+{
+    if (!module_name || !module_name[0] || (!options && option_count))
+        return PILOT_STATUS_INVALID_ARGUMENT;
+
+    pthread_mutex_lock(&g_lock);
+    PilotModOptReg *reg = find_module_opt_reg(module_name);
+    if (!reg) {
+        if (g_opt_registry_count >= PILOT_LIST_ITEMS_MAX) {
+            pthread_mutex_unlock(&g_lock);
+            return PILOT_STATUS_RANGE;
+        }
+        reg = &g_opt_registry[g_opt_registry_count++];
+        snprintf(reg->module_name, sizeof(reg->module_name), "%.63s",
+                 module_name);
+    }
+    reg->options = options;
+    reg->count = option_count;
+    pthread_mutex_unlock(&g_lock);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "PILOT_UI_OPT_REG mod=%.63s count=%zu",
+             module_name, option_count);
+    ui_log(msg);
+    return PILOT_STATUS_OK;
+}
+
+static void format_option_list_value(char *val_out, size_t val_cap,
+                                     const PilotUiOption *opt)
+{
+    if (!val_out || !val_cap)
+        return;
+    if (!opt) {
+        val_out[0] = '\0';
+        return;
+    }
+    if (opt->kind == PILOT_UI_OPT_BOOL) {
+        snprintf(val_out, val_cap, "%s", opt->value ? "开" : "关");
+    } else if (opt->kind == PILOT_UI_OPT_ENUM) {
+        const char *val = "?";
+        if (opt->choices && opt->choice_count > 0u) {
+            size_t ci = (opt->value >= 0 && (size_t)opt->value < opt->choice_count)
+                            ? (size_t)opt->value
+                            : 0u;
+            val = opt->choices[ci] ? opt->choices[ci] : "?";
+        }
+        snprintf(val_out, val_cap, "%.47s", val);
+    } else {
+        const char *act = (opt->action_text && opt->action_text[0])
+                              ? opt->action_text
+                              : "Run";
+        snprintf(val_out, val_cap, "%.24s (%d)", act, opt->value);
+    }
+}
+
+static const PilotUiPage *build_module_opt_list_page(void *user)
+{
+    size_t mod_idx = (size_t)(uintptr_t)user;
+    if (mod_idx >= g_mod_count)
+        return &g_pilot_root_page;
+
+    PilotModOptReg *reg = find_module_opt_reg(g_mod_names[mod_idx]);
+    size_t count = 0u;
+
+    /* Rows 0..opt_count-1: Module registered options (label left, value right) */
+    if (reg && reg->options) {
+        for (size_t k = 0; k < reg->count && count + 1u < PILOT_LIST_ITEMS_MAX; ++k) {
+            const char *lbl = reg->options[k].label ? reg->options[k].label : "Option";
+            format_list_label_truncated(g_mod_opt_labels[mod_idx][count],
+                                        sizeof(g_mod_opt_labels[mod_idx][count]),
+                                        NULL, lbl, PILOT_LIST_TITLE_MAX_COLS);
+            format_option_list_value(g_mod_opt_values[mod_idx][count],
+                                     sizeof(g_mod_opt_values[mod_idx][count]),
+                                     &reg->options[k]);
+            g_mod_opt_comps[mod_idx][count] = (PilotUiComponent){
+                .kind = PILOT_UI_COMP_TOGGLE,
+                .label = g_mod_opt_labels[mod_idx][count],
+                .value = g_mod_opt_values[mod_idx][count],
+            };
+            ++count;
+        }
+    }
+
+    /* Last row: Module Info & Enable Switch (opens 0x1C3 detail page) */
+    snprintf(g_mod_opt_labels[mod_idx][count],
+             sizeof(g_mod_opt_labels[mod_idx][count]),
+             "模块信息与开关");
+    g_mod_opt_comps[mod_idx][count] = (PilotUiComponent){
+        .kind = PILOT_UI_COMP_SUBMENU,
+        .label = g_mod_opt_labels[mod_idx][count],
+        .value = g_mod_enabled[mod_idx] ? "开" : "关",
+        .target_page = &g_modules_detail_pages[mod_idx],
+    };
+    ++count;
+
+    g_mod_opt_pages[mod_idx].kind = PILOT_UI_PAGE_LIST;
+    g_mod_opt_pages[mod_idx].title = g_mod_titles[mod_idx];
+    g_mod_opt_pages[mod_idx].components = g_mod_opt_comps[mod_idx];
+    g_mod_opt_pages[mod_idx].component_count = count;
+    g_mod_opt_pages[mod_idx].user_data = (void *)(uintptr_t)mod_idx;
+    return &g_mod_opt_pages[mod_idx];
+}
+
 static void bind_detail_page_to_layout(const PilotUiPage *page)
 {
     memcpy(g_layout_1c3, g_layout_1c3_stock, sizeof(g_layout_1c3));
     set_layout_item_rid(g_layout_1c3, 3u, PILOT_RID_PAGE_TITLE);
-    hide_layout_item(g_layout_1c3, 7u);  /* No9_Backgroundforbodyfirmupdatebutton */
-    hide_layout_item(g_layout_1c3, 12u); /* No6_Bodyfirmupdatebutton */
-
-    /* Also remove item 7 (firmware-update button) from the 0x1C3 controller's
-     * own 13-entry focus table (0x4AE9210 via GOT 0x4E9A470).  The controller
-     * cursor initializer 0x21874E4 scans this table—not the view layout—for
-     * entries whose +0x00 type descriptor is 0x8343DB0 (items 7 and 8).
-     * Demoting item 7's type descriptor to item 0's static background (0x8344360)
-     * leaves only item 8 (OK button) in the 2D cursor tree, so wheel/LEFT/RIGHT
-     * cannot move focus off the OK button onto the hidden update button. */
     memcpy(g_ctrl_items_1c3, g_ctrl_items_1c3_stock, sizeof(g_ctrl_items_1c3));
-    *(uintptr_t *)(g_ctrl_items_1c3 + 7u * APPFW_CTRL_ITEM_SIZE) =
-        *(const uintptr_t *)g_ctrl_items_1c3_stock;
+
+    const PilotUiComponent *toggle = NULL;
+    if (page) {
+        for (size_t i = 0; i < page->component_count; ++i) {
+            if (page->components[i].kind == PILOT_UI_COMP_TOGGLE) {
+                toggle = &page->components[i];
+                break;
+            }
+        }
+    }
+
+    if (toggle) {
+        g_detail_has_toggle = 1;
+        g_detail_module_index = (int)(uintptr_t)page->user_data;
+        g_toggle_string = toggle->label ? toggle->label : "";
+        if (toggle->w > 0 && toggle->h > 0) {
+            set_layout_item_rect(g_layout_1c3, 7u,
+                                 toggle->x, toggle->y, toggle->w, toggle->h);
+            set_ctrl_item_rect(g_ctrl_items_1c3, 7u,
+                               toggle->x, toggle->y, toggle->w, toggle->h);
+            set_layout_item_rect(g_layout_1c3, 12u,
+                                 toggle->x + 7, toggle->y + 6,
+                                 toggle->w - 14, toggle->h - 12);
+            set_ctrl_item_rect(g_ctrl_items_1c3, 12u,
+                               toggle->x + 7, toggle->y + 6,
+                               toggle->w - 14, toggle->h - 12);
+        }
+        set_layout_item_rid(g_layout_1c3, 12u, PILOT_RID_DETAIL_TOGGLE);
+    } else {
+        g_detail_has_toggle = 0;
+        g_detail_module_index = -1;
+        g_toggle_string = "";
+        hide_layout_item(g_layout_1c3, 7u);  /* No9_Backgroundforbodyfirmupdatebutton */
+        hide_layout_item(g_layout_1c3, 12u); /* No6_Bodyfirmupdatebutton */
+
+        /* Also remove item 7 (firmware-update button) from the 0x1C3 controller's
+         * own 13-entry focus table (0x4AE9210 via GOT 0x4E9A470).  The controller
+         * cursor initializer 0x21874E4 scans this table—not the view layout—for
+         * entries whose +0x00 type descriptor is 0x8343DB0 (items 7 and 8).
+         * Demoting item 7's type descriptor to item 0's static background (0x8344360)
+         * leaves only item 8 (OK button) in the 2D cursor tree, so wheel/LEFT/RIGHT
+         * cannot move focus off the OK button onto the hidden update button. */
+        *(uintptr_t *)(g_ctrl_items_1c3 + 7u * APPFW_CTRL_ITEM_SIZE) =
+            *(const uintptr_t *)g_ctrl_items_1c3_stock;
+    }
 
     for (uint32_t s = 0; s < PILOT_TEXT_SLOTS_MAX; ++s) {
         g_slot_strings[s] = "";
@@ -712,6 +1132,8 @@ static void bind_list_page_to_layout(const PilotUiPage *page)
     for (uint32_t i = 0; i < PILOT_LIST_ITEMS_MAX; ++i) {
         g_list_strings[i] = "";
         g_subitem_strings[i] = "";
+        g_list_val_strings[i] = NULL;
+        g_list_val_sprites[i] = NULL;
     }
     if (!page) {
         *(uint32_t *)(g_desc + 0x50ull) = 0u;
@@ -732,12 +1154,21 @@ static void bind_list_page_to_layout(const PilotUiPage *page)
                 ? PILOT_DETAIL_SCREEN_ID
                 : PILOT_LIST_SCREEN_ID;
         g_list_strings[i] = c->label ? c->label : "";
+        pilot_bind_list_val_row(i, c->value);
 
         memcpy(g_item_descs[i], g_stock_item_desc, APPFW_ITEM_DESC_SIZE);
         *(uint32_t *)(g_item_descs[i] + 0x00ull) =
             PILOT_RID_LIST_ITEM_BASE + (uint32_t)i;
         *(uint32_t *)(g_item_descs[i] + 0x0Cull) = PILOT_RID_EMPTY;
-        *(uint32_t *)(g_item_descs[i] + 0x20ull) = target_sid;
+        *(uint32_t *)(g_item_descs[i] + 0x20ull) =
+            (c->value && c->value[0]) ? PILOT_OPT_SCREEN_ID : target_sid;
+        if (c->value && c->value[0]) {
+            *(uint32_t *)(g_item_descs[i] + 0x40ull) = 1u;
+            *(uintptr_t *)(g_item_descs[i] + 0x48ull) =
+                (uintptr_t)g_list_val_rows[i];
+            *(uintptr_t *)(g_item_descs[i] + 0x68ull) =
+                g_appfw_base + APPFW_VISIBILITY_OK_OFF;
+        }
         *(uintptr_t *)(g_item_descs[i] + 0x58ull) =
             g_appfw_base + APPFW_VISIBILITY_OK_OFF;
 
@@ -802,9 +1233,94 @@ static void bind_list_page_to_layout(const PilotUiPage *page)
     }
 }
 
+#include "pilot_lv_ui.inc"
+
+#define PILOT_RID_OVERRIDES_MAX 16u
+
+typedef struct {
+    uint32_t rid;
+    int active;
+    char text[64];
+} PilotRidOverride;
+
+static pthread_mutex_t g_rid_override_lock = PTHREAD_MUTEX_INITIALIZER;
+static PilotRidOverride g_rid_overrides[PILOT_RID_OVERRIDES_MAX];
+static uint32_t g_rid_override_count = 0u;
+
+static int pilot_rid_override_lookup(uint32_t rid, char *out, size_t cap)
+{
+    if (__atomic_load_n(&g_rid_override_count, __ATOMIC_ACQUIRE) == 0u)
+        return 0;
+    int found = 0;
+    pthread_mutex_lock(&g_rid_override_lock);
+    for (size_t i = 0; i < PILOT_RID_OVERRIDES_MAX; ++i) {
+        if (g_rid_overrides[i].active && g_rid_overrides[i].rid == rid) {
+            snprintf(out, cap, "%s", g_rid_overrides[i].text);
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_rid_override_lock);
+    return found;
+}
+
+__attribute__((visibility("default")))
+PilotStatus pilot_ui_set_rid_override_v1(uint32_t rid, const char *text)
+{
+    if (rid == 0u)
+        return PILOT_STATUS_INVALID_ARGUMENT;
+
+    pthread_mutex_lock(&g_rid_override_lock);
+    int slot = -1;
+    int free_slot = -1;
+    for (size_t i = 0; i < PILOT_RID_OVERRIDES_MAX; ++i) {
+        if (g_rid_overrides[i].active && g_rid_overrides[i].rid == rid) {
+            slot = (int)i;
+            break;
+        }
+        if (!g_rid_overrides[i].active && free_slot < 0)
+            free_slot = (int)i;
+    }
+
+    if (!text || !text[0]) {
+        if (slot >= 0) {
+            g_rid_overrides[slot].active = 0;
+            g_rid_overrides[slot].rid = 0u;
+            g_rid_overrides[slot].text[0] = '\0';
+            uint32_t cnt = __atomic_load_n(&g_rid_override_count, __ATOMIC_RELAXED);
+            if (cnt > 0u)
+                __atomic_store_n(&g_rid_override_count, cnt - 1u, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&g_rid_override_lock);
+        return PILOT_STATUS_OK;
+    }
+
+    if (slot < 0) {
+        if (free_slot < 0) {
+            pthread_mutex_unlock(&g_rid_override_lock);
+            return PILOT_STATUS_RANGE;
+        }
+        slot = free_slot;
+        g_rid_overrides[slot].rid = rid;
+        g_rid_overrides[slot].active = 1;
+        uint32_t cnt = __atomic_load_n(&g_rid_override_count, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_rid_override_count, cnt + 1u, __ATOMIC_RELEASE);
+    }
+    snprintf(g_rid_overrides[slot].text, sizeof(g_rid_overrides[slot].text),
+             "%s", text);
+    pthread_mutex_unlock(&g_rid_override_lock);
+    return PILOT_STATUS_OK;
+}
+
 static void pilot_set_string_rid_hook(void *sprite, uint32_t rid)
 {
     if (g_orig_set_string_cstr) {
+        if (rid == PILOT_BUSY_MSG_RID && pilot_busy_is_active()) {
+            char msg[160];
+            pilot_busy_copy_text(msg, sizeof(msg));
+            g_orig_set_string_cstr(sprite, msg);
+            return;
+        }
         if (rid == PILOT_RID_MENU_LABEL) {
             g_orig_set_string_cstr(sprite, g_menu_title);
             return;
@@ -816,15 +1332,43 @@ static void pilot_set_string_rid_hook(void *sprite, uint32_t rid)
             g_orig_set_string_cstr(sprite, t);
             return;
         }
+        if (rid == PILOT_RID_DETAIL_TOGGLE) {
+            g_toggle_text_sprite = sprite;
+            g_orig_set_string_cstr(sprite, g_toggle_string ? g_toggle_string : "");
+            return;
+        }
+        if (rid == PILOT_RID_OPT_TITLE) {
+            g_orig_set_string_cstr(sprite, g_opt_title_string ? g_opt_title_string : "");
+            return;
+        }
+        if (rid >= PILOT_RID_OPT_CHOICE_BASE &&
+            rid < PILOT_RID_OPT_CHOICE_BASE + PILOT_OPT_CHOICES_MAX) {
+            const char *s = g_opt_choice_strings[rid - PILOT_RID_OPT_CHOICE_BASE];
+            g_orig_set_string_cstr(sprite, s ? s : "");
+            return;
+        }
+        if (rid >= PILOT_RID_LIST_VAL_BASE &&
+            rid < PILOT_RID_LIST_VAL_BASE + PILOT_LIST_ITEMS_MAX) {
+            uint32_t row = rid - PILOT_RID_LIST_VAL_BASE;
+            g_list_val_sprites[row] = sprite;
+            const char *s = g_list_val_strings[row];
+            g_orig_set_string_cstr(sprite, s ? s : "");
+            return;
+        }
         if (rid >= PILOT_RID_SLOT_BASE &&
             rid < PILOT_RID_SLOT_BASE + PILOT_TEXT_SLOTS_MAX) {
-            const char *s = g_slot_strings[rid - PILOT_RID_SLOT_BASE];
+            uint32_t slot = rid - PILOT_RID_SLOT_BASE;
+            if (slot == 0u)
+                g_status_text_sprite = sprite;
+            const char *s = g_slot_strings[slot];
             g_orig_set_string_cstr(sprite, s ? s : "");
             return;
         }
         if (rid >= PILOT_RID_LIST_ITEM_BASE &&
             rid < PILOT_RID_LIST_ITEM_BASE + PILOT_LIST_ITEMS_MAX) {
-            const char *s = g_list_strings[rid - PILOT_RID_LIST_ITEM_BASE];
+            uint32_t row = rid - PILOT_RID_LIST_ITEM_BASE;
+            g_list_item_sprites[row] = sprite;
+            const char *s = g_list_strings[row];
             g_orig_set_string_cstr(sprite, s ? s : "");
             return;
         }
@@ -838,6 +1382,11 @@ static void pilot_set_string_rid_hook(void *sprite, uint32_t rid)
             g_orig_set_string_cstr(sprite, "");
             return;
         }
+        char ov[64];
+        if (pilot_rid_override_lookup(rid, ov, sizeof(ov))) {
+            g_orig_set_string_cstr(sprite, ov);
+            return;
+        }
     }
     if (g_orig_set_string_rid)
         g_orig_set_string_rid(sprite, rid);
@@ -846,10 +1395,10 @@ static void pilot_set_string_rid_hook(void *sprite, uint32_t rid)
 static void pilot_1c3_view_update_hook(void *view, uint32_t flag)
 {
     if (view && g_pilot_detail_active) {
-        /* 0x28FCC74 reads *(uint8_t *)(view + 0x8FC) via 0x28FCC6C and writes
-         * it to widget[7]+0x3F and widget[12]+0x341 (update button enable/vis).
-         * Force it to 0 in Pilot detail pages so view_update never re-enables
-         * the hidden firmware-update button. */
+        /* 0x28FCC74 copies *(uint8_t *)(view + 0x8FC) to widget[7]+0x3F and
+         * widget[12]+0x341, which is the grayed-out/disabled visual state
+         * (1 = disabled/gray, 0 = normal active style). Keep it 0 so the
+         * toggle button renders with normal active appearance. */
         *((uint8_t *)view + 0x8FCu) = 0u;
     }
     if (g_orig_view_update_1c3)
@@ -926,7 +1475,7 @@ static void *pilot_1c3_ctrl_factory_hook(void *buf, void *arg1, void *arg2,
     if (patch_got_ptr(ctrl_got, (uintptr_t)g_ctrl_items_1c3,
                       g_orig_ctrl_items_1c3) != PILOT_STATUS_OK)
         ui_log("PILOT_UI_ERR detail focus table restore failed");
-    pilot_log_detail_focus(ret);
+    pilot_log_detail_focus(ret, g_detail_has_toggle);
 
     return ret;
 }
@@ -944,6 +1493,8 @@ static void *pilot_1c3_view_factory_hook(void *buf, void *arg1, void *arg2,
     }
 
     g_detail_page = page;
+    g_toggle_text_sprite = NULL;
+    g_status_text_sprite = NULL;
     bind_detail_page_to_layout(g_detail_page);
     ui_log("PILOT_UI_TRACE 1c3_view_factory open_detail");
     if (g_in_pilot_293)
@@ -961,6 +1512,7 @@ static void *pilot_1c3_view_factory_hook(void *buf, void *arg1, void *arg2,
         (void)patch_got_ptr(layout_got, (uintptr_t)g_layout_1c3,
                             g_orig_layout_1c3);
 
+    g_active_1c3_view = ret;
     if (ret) {
         *((uint8_t *)ret + 0x8FCu) = 0u;
         uintptr_t *orig_vt = *(uintptr_t **)ret;
@@ -976,6 +1528,25 @@ static void *pilot_1c3_view_factory_hook(void *buf, void *arg1, void *arg2,
     return ret;
 }
 
+static void pilot_apply_pending_list_page(void)
+{
+    if (!g_pending_list_page)
+        return;
+    g_active_page = resolve_page(g_pending_list_page);
+    g_pending_list_page = NULL;
+    g_page_stack_depth = (g_active_page == &g_pilot_root_page) ? 0 : 1;
+    memset(g_list_item_sprites, 0, sizeof(g_list_item_sprites));
+    bind_list_page_to_layout(g_active_page);
+    if (!g_return_list_pending) {
+        uint32_t *row_p = pilot_menu_id_ptr(APPFW_GET_SEL_ROW_OFF);
+        uint32_t *item_p = pilot_menu_id_ptr(APPFW_GET_CUR_ITEM_OFF);
+        if (row_p)
+            *row_p = PILOT_ITEM_ID_BASE;
+        if (item_p)
+            *item_p = PILOT_ITEM_ID_BASE;
+    }
+}
+
 static void pilot_293_view_update_hook(void *view, uint32_t flag)
 {
     /* NOTE: previously this hook wrote a fixed group id into both the
@@ -989,6 +1560,21 @@ static void pilot_293_view_update_hook(void *view, uint32_t flag)
      * re-added safely, but do not touch view state here. */
     if (g_orig_view_update_293)
         g_orig_view_update_293(view, flag);
+}
+
+static void *pilot_292_ctrl_factory_hook(void *buf, void *arg1, void *arg2,
+                                         void *arg3, uint32_t arg4)
+{
+    /* Entering main menu (0x292) — e.g. pressing MENU from LiveView after
+     * shutter-aborting out of 0x2A7/0x1C3, or backing out of 0x293 — always
+     * invalidates any pending submenu return state so the next 0x293
+     * ctrl_factory builds its focus tree for the full Pilot root. */
+    pilot_clear_list_return();
+    g_pending_list_page = NULL;
+    g_pilot_detail_active = 0;
+    g_pilot_2a7_active = 0;
+    pilot_busy_reset_state();
+    return g_orig_ctrl_factory_292(buf, arg1, arg2, arg3, arg4);
 }
 
 static void *pilot_293_ctrl_factory_hook(void *buf, void *arg1, void *arg2,
@@ -1022,18 +1608,29 @@ static void *pilot_293_ctrl_factory_hook(void *buf, void *arg1, void *arg2,
         uint32_t *item_p = get_item ? get_item() : NULL;
         if (grp_p && *grp_p == PILOT_GROUP_ID) {
             int drill_down = (g_pending_list_page != NULL);
+            int returning = (g_return_list_pending != 0);
             g_in_pilot_293 = 1;
             g_pilot_detail_active = 0;
-            g_page_stack_depth = 0;
-            g_active_page = resolve_page(
-                g_pending_list_page ? g_pending_list_page
-                                    : (g_active_page ? g_active_page
-                                                     : &g_pilot_root_page));
-            g_pending_list_page = NULL;
+            g_pilot_2a7_active = 0;
+            if (g_pending_list_page) {
+                g_active_page = resolve_page(g_pending_list_page);
+                g_pending_list_page = NULL;
+            } else if (returning && g_return_list_page) {
+                g_active_page = resolve_page(g_return_list_page);
+            } else {
+                /* Fresh entry (e.g. from main menu 0x292 or after exiting via
+                 * shutter to LiveView): reset to Pilot root BEFORE
+                 * g_orig_ctrl_factory_293 builds the controller's focus tree,
+                 * otherwise the focus tree keeps the stale submenu item count
+                 * while the view renders the full root list. */
+                g_active_page = resolve_page(&g_pilot_root_page);
+            }
+            g_page_stack_depth = (g_active_page == &g_pilot_root_page) ? 0 : 1;
+            memset(g_list_item_sprites, 0, sizeof(g_list_item_sprites));
             bind_list_page_to_layout(g_active_page);
 
             size_t count = g_active_page ? g_active_page->component_count : 0u;
-            if (drill_down) {
+            if (drill_down && !g_return_list_pending) {
                 if (row_p)
                     *row_p = PILOT_ITEM_ID_BASE;
                 if (item_p)
@@ -1095,11 +1692,13 @@ static void *pilot_293_view_factory_hook(void *buf, void *arg1, void *arg2,
 
     g_in_pilot_293 = 1;
     g_pilot_detail_active = 0;
+    g_pilot_2a7_active = 0;
     if (g_pending_list_page || !g_active_page) {
-        g_page_stack_depth = 0;
         g_active_page = resolve_page(g_pending_list_page ? g_pending_list_page
                                                          : &g_pilot_root_page);
         g_pending_list_page = NULL;
+        g_page_stack_depth = (g_active_page == &g_pilot_root_page) ? 0 : 1;
+        memset(g_list_item_sprites, 0, sizeof(g_list_item_sprites));
         bind_list_page_to_layout(g_active_page);
     }
     /* Synchronize sel_row (0x2F73228) and cur_item (0x2F73278) without
@@ -1178,8 +1777,17 @@ static void reset_pilot_293_state(void)
     g_pending_list_page = NULL;
     g_active_293_view = NULL;
     g_active_293_ctrl = NULL;
+    g_active_1c3_view = NULL;
+    g_toggle_text_sprite = NULL;
+    g_status_text_sprite = NULL;
+    memset(g_list_item_sprites, 0, sizeof(g_list_item_sprites));
     g_in_pilot_293 = 0;
     g_pilot_detail_active = 0;
+    g_pilot_2a7_active = 0;
+    pilot_busy_reset_state();
+    g_detail_has_toggle = 0;
+    g_detail_module_index = -1;
+    g_saved_root_item = PILOT_ITEM_ID_BASE;
 }
 
 static int is_pilot_item_id(uint32_t id)
@@ -1200,6 +1808,154 @@ static int is_pilot_item_id(uint32_t id)
  * generic_open dispatches the per-view model *(ctrl+0x11b28) which presents the
  * sid through the page table — i.e. exactly our already-hooked 0x1c3/0x293
  * factories render.  Foreign (non-Pilot) ids still pass through to native. */
+static int pilot_pop_to_root_list(void *ctrl)
+{
+    if (!ctrl || !g_appfw_base)
+        return 0;
+    generic_open_fn go =
+        (generic_open_fn)(g_appfw_base + APPFW_293_GENERIC_OPEN_OFF);
+    if (!go)
+        return 0;
+
+    g_pending_list_page = &g_pilot_root_page;
+    g_page_stack_depth = 0;
+    g_return_list_page = &g_pilot_root_page;
+    g_return_list_item = g_saved_root_item;
+    g_return_list_pending = 1;
+
+    uint32_t a[4] = { PILOT_LIST_SCREEN_ID, 0u, 0u, 0u };
+    uint32_t b[4] = { PILOT_GENERIC_OPEN_SKIP, 0u, 0u, 0u };
+    uint32_t c[4] = { PILOT_GENERIC_OPEN_SKIP, 0u, 0u, 0u };
+    ui_log("PILOT_UI_DBG pop_to_root sid=0x293");
+    go(ctrl, a, b, c);
+    return 1;
+}
+
+static void pilot_2a7_apply_selection(uint32_t choice_index)
+{
+    size_t mod_idx = g_pilot_2a7_mod_idx;
+    size_t row_idx = g_pilot_2a7_row_idx;
+    if (mod_idx >= g_mod_count)
+        return;
+
+    PilotModOptReg *reg = find_module_opt_reg(g_mod_names[mod_idx]);
+    if (!reg || !reg->options || row_idx >= reg->count)
+        return;
+    PilotUiOption *opt = &reg->options[row_idx];
+    if (opt->kind == PILOT_UI_OPT_BOOL) {
+        opt->value = (choice_index == 0u) ? 1 : 0;
+    } else if (opt->kind == PILOT_UI_OPT_ENUM && choice_index < opt->choice_count) {
+        opt->value = (int32_t)choice_index;
+    }
+    if (opt->on_change)
+        opt->on_change(opt, opt->user);
+    format_option_list_value(g_mod_opt_values[mod_idx][row_idx],
+                             sizeof(g_mod_opt_values[mod_idx][row_idx]),
+                             opt);
+    g_list_val_strings[row_idx] = g_mod_opt_values[mod_idx][row_idx];
+    char msg[160];
+    snprintf(msg, sizeof(msg), "PILOT_UI_2A7_SET mod=%s opt=%s val=%d",
+             g_mod_names[mod_idx], opt->label ? opt->label : "?", opt->value);
+    ui_log(msg);
+}
+
+static int pilot_open_2a7_picker(void *ctrl, size_t mod_idx, size_t row_idx,
+                                 const char *title,
+                                 const char *const *choices, size_t count,
+                                 uint32_t current_index)
+{
+    if (!ctrl || !g_appfw_base || !g_orig_2a7_confirm || count == 0u)
+        return 0;
+    generic_open_fn go =
+        (generic_open_fn)(g_appfw_base + APPFW_293_GENERIC_OPEN_OFF);
+    if (!go)
+        return 0;
+
+    pilot_2a7_prepare_choices(title, choices, count, current_index);
+    g_pilot_2a7_mod_idx = mod_idx;
+    g_pilot_2a7_row_idx = row_idx;
+    g_pilot_2a7_active = 1;
+    pilot_save_list_return(ctrl, PILOT_ITEM_ID_BASE + (uint32_t)row_idx);
+
+    uint32_t *item_p = pilot_menu_id_ptr(APPFW_GET_CUR_ITEM_OFF);
+    if (item_p)
+        *item_p = PILOT_OPT_GROUP_ID;
+
+    uint32_t a[4] = { PILOT_OPT_SCREEN_ID, 0u, 0u, 0u };
+    uint32_t b[4] = { PILOT_GENERIC_OPEN_SKIP, 0u, 0u, 0u };
+    uint32_t c[4] = { PILOT_GENERIC_OPEN_SKIP, 0u, 0u, 0u };
+    ui_log("PILOT_UI_DBG open_2a7_picker sid=0x2a7");
+    go(ctrl, a, b, c);
+    return 1;
+}
+
+static int pilot_handle_opt_list_click(void *ctrl, size_t row_idx)
+{
+    if (!g_active_page || g_active_page == &g_pilot_root_page ||
+        row_idx >= g_active_page->component_count)
+        return 0;
+
+    size_t mod_idx = (size_t)(uintptr_t)g_active_page->user_data;
+    if (mod_idx >= g_mod_count)
+        return 0;
+
+    const PilotUiComponent *c = &g_active_page->components[row_idx];
+    if (c->kind == PILOT_UI_COMP_SUBMENU && c->target_page)
+        return 0; /* e.g. Module Info -> fall through to generic_open(0x1C3) */
+
+    if (c->kind == PILOT_UI_COMP_TEXT) {
+        return pilot_pop_to_root_list(ctrl);
+    }
+
+    if (c->kind != PILOT_UI_COMP_TOGGLE)
+        return 0;
+
+    static const char *const k_on_off_choices[2] = { "开", "关" };
+
+    PilotModOptReg *reg = find_module_opt_reg(g_mod_names[mod_idx]);
+    if (!reg || !reg->options || row_idx >= reg->count)
+        return 1;
+    PilotUiOption *opt = &reg->options[row_idx];
+    if (opt->kind == PILOT_UI_OPT_BOOL) {
+        uint32_t cur = opt->value ? 0u : 1u;
+        if (pilot_open_2a7_picker(ctrl, mod_idx, row_idx,
+                                  opt->label ? opt->label : "Option",
+                                  k_on_off_choices, 2u, cur))
+            return 1;
+        opt->value = opt->value ? 0 : 1;
+    } else if (opt->kind == PILOT_UI_OPT_ENUM && opt->choice_count > 0u) {
+        uint32_t cur = (opt->value >= 0 && (size_t)opt->value < opt->choice_count)
+                           ? (uint32_t)opt->value
+                           : 0u;
+        if (pilot_open_2a7_picker(ctrl, mod_idx, row_idx,
+                                  opt->label ? opt->label : "Option",
+                                  opt->choices, opt->choice_count, cur))
+            return 1;
+        opt->value = (int32_t)(((size_t)cur + 1u) % opt->choice_count);
+    } else {
+        opt->value += 1;
+    }
+    if (opt->on_change)
+        opt->on_change(opt, opt->user);
+    format_option_list_value(g_mod_opt_values[mod_idx][row_idx],
+                             sizeof(g_mod_opt_values[mod_idx][row_idx]),
+                             opt);
+    g_list_val_strings[row_idx] = g_mod_opt_values[mod_idx][row_idx];
+
+    char msg[160];
+    snprintf(msg, sizeof(msg), "PILOT_UI_OPT_ACT mod=%s opt=%s val=%d",
+             g_mod_names[mod_idx],
+             opt->label ? opt->label : "?", opt->value);
+    ui_log(msg);
+
+    if (g_orig_set_string_cstr && g_list_val_sprites[row_idx])
+        g_orig_set_string_cstr(g_list_val_sprites[row_idx],
+                               g_list_val_strings[row_idx]);
+    if (g_active_293_view && g_orig_view_update_293)
+        g_orig_view_update_293(g_active_293_view, 1u);
+    return 1;
+}
+
 static int pilot_open_focused_item(void *ctrl)
 {
     char msg[160];
@@ -1260,13 +2016,26 @@ static int pilot_open_focused_item(void *ctrl)
             *item_p = item_id;
     }
 
+    /* In a module's native 0x293 option list, handle inline toggle/enum/action
+     * and Back rows directly without leaving the 0x293 list screen. */
+    if (g_active_page && g_active_page != &g_pilot_root_page &&
+        item_id >= PILOT_ITEM_ID_BASE &&
+        item_id < PILOT_ITEM_ID_BASE + g_active_page->component_count) {
+        size_t row_idx = (size_t)(item_id - PILOT_ITEM_ID_BASE);
+        if (pilot_handle_opt_list_click(ctrl, row_idx))
+            return 1;
+    }
+
     /* Choose the target screen from OUR model, not from is_nav/resolve. */
     int is_pilot = 0;
     const PilotUiPage *page = resolve_detail_page_from_menu(&is_pilot);
     uint32_t sid;
     if (page && page->kind == PILOT_UI_PAGE_LIST) {
         sid = PILOT_LIST_SCREEN_ID;   /* drill down: 0x293 factory renders it */
+        g_saved_root_item = item_id;
+        g_page_stack_depth = 1;
         g_pending_list_page = page;
+        pilot_clear_list_return();
     } else {
         sid = PILOT_DETAIL_SCREEN_ID; /* 0x1c3 factory binds from cur_item */
         pilot_save_list_return(ctrl, item_id);
@@ -1346,18 +2115,79 @@ static uint32_t pilot_btn_left(void *ctrl, void *ev)
     return r;
 }
 
-static uint32_t pilot_btn_back(void *ctrl, void *ev)
+static uint32_t pilot_1c3_confirm_hook(void *ctrl, void *ev)
 {
-    char msg[96];
-    snprintf(msg, sizeof(msg), "PILOT_UI_DBG btn_back in=%d view=%p", g_in_pilot_293, g_active_293_view);
+    if (g_pilot_detail_active && g_detail_has_toggle && ctrl && g_appfw_base) {
+        void *cursor = (uint8_t *)ctrl + APPFW_293_CURSOR_OBJ_OFF;
+        uint32_t index = ((pilot_cursor_index_fn)(g_appfw_base +
+                           APPFW_CURSOR_GET_INDEX_OFF))(cursor);
+        if (index == 7u) {
+            if (g_detail_module_index >= 0 &&
+                (size_t)g_detail_module_index < g_mod_count) {
+                size_t idx = (size_t)g_detail_module_index;
+                g_mod_enabled[idx] = !g_mod_enabled[idx];
+                int saved = write_manifest_fsys();
+                if (!saved) {
+                    g_mod_enabled[idx] = !g_mod_enabled[idx];
+                    ui_log("PILOT_UI_ERR manifest write failed; toggle reverted");
+                    return 1u;
+                }
+                refresh_module_ui_strings(idx);
+                g_toggle_string = g_mod_toggle_bufs[idx];
+                g_slot_strings[0] = g_mod_status_bufs[idx];
+                const char *en_val = g_mod_enabled[idx] ? "开" : "关";
+                if (idx + 1u < PILOT_LIST_ITEMS_MAX) {
+                    g_root_components[idx + 1u].value = en_val;
+                    if (g_active_page == &g_pilot_root_page)
+                        g_list_val_strings[idx + 1u] = en_val;
+                }
+                if (g_active_page == &g_mod_opt_pages[idx] &&
+                    g_mod_opt_pages[idx].component_count > 0u) {
+                    size_t last = g_mod_opt_pages[idx].component_count - 1u;
+                    g_mod_opt_comps[idx][last].value = en_val;
+                    g_list_val_strings[last] = en_val;
+                }
+                if (g_orig_set_string_cstr) {
+                    if (g_toggle_text_sprite)
+                        g_orig_set_string_cstr(g_toggle_text_sprite,
+                                               g_toggle_string);
+                    if (g_status_text_sprite)
+                        g_orig_set_string_cstr(g_status_text_sprite,
+                                               g_mod_status_bufs[idx]);
+                }
+                if (g_active_1c3_view && g_orig_view_update_1c3)
+                    g_orig_view_update_1c3(g_active_1c3_view, 1u);
+                char msg[160];
+                snprintf(msg, sizeof(msg),
+                         "PILOT_UI_TOGGLE idx=%zu mod=%s enabled=%d saved=1",
+                         idx, g_mod_names[idx], g_mod_enabled[idx]);
+                ui_log(msg);
+            }
+            return 1u;
+        }
+    }
+    return g_orig_1c3_confirm ? g_orig_1c3_confirm(ctrl, ev) : 1u;
+}
+
+static uint32_t pilot_btn_back_common(void *ctrl, void *ev,
+                                      ctrl_event_fn orig_fn, const char *tag)
+{
+    char msg[112];
+    snprintf(msg, sizeof(msg), "PILOT_UI_DBG %s in=%d depth=%d view=%p",
+             tag, g_in_pilot_293, g_page_stack_depth, g_active_293_view);
     ui_log(msg);
-    uint32_t r = g_orig_btn_back ? g_orig_btn_back(ctrl, ev) : 1u;
-    /* BACK is the screen-pop key (0x29ebb1c): it closes a detail popup OR exits
-     * the list to the native menu.  Only the latter leaves Pilot.  Detect it
-     * from the LIVE current-group truth-source after the native pop: while a
-     * popup/sub-list is open the group stays PILOT_GROUP_ID, so we KEEP pilot
-     * state (the list retains its cursor/selection).  Resetting on every BACK
-     * was emptying the selection when merely closing a detail popup. */
+    if (g_in_pilot_293 && !g_pilot_detail_active && g_page_stack_depth > 0 &&
+        pilot_current_group()) {
+        if (pilot_pop_to_root_list(ctrl)) {
+            snprintf(msg, sizeof(msg), "PILOT_UI_DBG %s popped_to_root", tag);
+            ui_log(msg);
+            return 1u;
+        }
+    }
+    uint32_t r = orig_fn ? orig_fn(ctrl, ev) : 1u;
+    /* BACK is the screen-pop key (0x29ebb1c / 0x29ec030): it closes a detail
+     * popup OR exits the list to the native menu. Only the latter leaves Pilot.
+     * Detect it from the LIVE current-group truth-source after the native pop. */
     if (g_in_pilot_293) {
         typedef uint32_t *(*get_id_ptr_fn)(void);
         get_id_ptr_fn get_grp =
@@ -1366,16 +2196,27 @@ static uint32_t pilot_btn_back(void *ctrl, void *ev)
         uint32_t grp = grp_p ? *grp_p : 0u;
         if (grp != PILOT_GROUP_ID) {
             snprintf(msg, sizeof(msg),
-                     "PILOT_UI_DBG btn_back exit grp=0x%x reset", grp);
+                     "PILOT_UI_DBG %s exit grp=0x%x reset", tag, grp);
             ui_log(msg);
             reset_pilot_293_state();
         } else {
-            ui_log("PILOT_UI_DBG btn_back stay grp=0x535");
+            snprintf(msg, sizeof(msg), "PILOT_UI_DBG %s stay grp=0x535", tag);
+            ui_log(msg);
         }
     }
-    snprintf(msg, sizeof(msg), "PILOT_UI_DBG btn_back orig=0x%x", r);
+    snprintf(msg, sizeof(msg), "PILOT_UI_DBG %s orig=0x%x", tag, r);
     ui_log(msg);
     return r;
+}
+
+static uint32_t pilot_btn_back(void *ctrl, void *ev)
+{
+    return pilot_btn_back_common(ctrl, ev, g_orig_btn_back, "btn_back");
+}
+
+static uint32_t pilot_btn_back2(void *ctrl, void *ev)
+{
+    return pilot_btn_back_common(ctrl, ev, g_orig_btn_back2, "btn_back2");
 }
 
 static PilotStatus install_pilot_menu_ui(void)
@@ -1392,7 +2233,7 @@ static PilotStatus install_pilot_menu_ui(void)
     uintptr_t got_layout_1c3 = 0, got_ctrl_items_1c3 = 0, got_layout_293 = 0,
               got_rid_val = 0;
     uintptr_t got_btn_confirm = 0, got_btn_right = 0, got_btn_left = 0,
-              got_btn_back = 0;
+              got_btn_back = 0, got_btn_back2 = 0, got_1c3_confirm = 0;
     if (g_api->memory_read(g_appfw_base + APPFW_GOT_MENU_TABLE, &got_menu_val,
                            sizeof(got_menu_val)) != PILOT_STATUS_OK ||
         g_api->memory_read(g_appfw_base + APPFW_GOT_PAGE_TABLE, &got_page_val,
@@ -1414,6 +2255,10 @@ static PilotStatus install_pilot_menu_ui(void)
                            &got_btn_left, sizeof(got_btn_left)) != PILOT_STATUS_OK ||
         g_api->memory_read(g_appfw_base + APPFW_GOT_BTN_BACK,
                            &got_btn_back, sizeof(got_btn_back)) != PILOT_STATUS_OK ||
+        g_api->memory_read(g_appfw_base + APPFW_GOT_BTN_BACK2,
+                           &got_btn_back2, sizeof(got_btn_back2)) != PILOT_STATUS_OK ||
+        g_api->memory_read(g_appfw_base + APPFW_GOT_1C3_CONFIRM,
+                           &got_1c3_confirm, sizeof(got_1c3_confirm)) != PILOT_STATUS_OK ||
         g_api->memory_read(g_appfw_base + APPFW_GOT_SET_STRING_RID,
                            &got_rid_val, sizeof(got_rid_val)) != PILOT_STATUS_OK) {
         ui_log("PILOT_UI_ERR got read failed");
@@ -1500,6 +2345,15 @@ static PilotStatus install_pilot_menu_ui(void)
     *(uintptr_t *)(entry_1c3 + 0x00ull) = (uintptr_t)pilot_1c3_view_factory_hook;
     *(uintptr_t *)(entry_1c3 + 0x08ull) = (uintptr_t)pilot_1c3_ctrl_factory_hook;
 
+    uint8_t *entry_292 =
+        g_page_table + 0x292ull * APPFW_PAGE_ENTRY_SIZE;
+    uintptr_t orig_292_ctrl = *(uintptr_t *)(entry_292 + 0x08ull);
+    if (orig_292_ctrl) {
+        g_orig_ctrl_factory_292 = (ctrl_factory_fn)orig_292_ctrl;
+        *(uintptr_t *)(entry_292 + 0x08ull) =
+            (uintptr_t)pilot_292_ctrl_factory_hook;
+    }
+
     uint8_t *entry_293 =
         g_page_table + PILOT_LIST_SCREEN_ID * APPFW_PAGE_ENTRY_SIZE;
     g_orig_view_factory_293 =
@@ -1508,6 +2362,15 @@ static PilotStatus install_pilot_menu_ui(void)
         (ctrl_factory_fn)(g_appfw_base + APPFW_CTRL_FACTORY_293_OFF);
     *(uintptr_t *)(entry_293 + 0x00ull) = (uintptr_t)pilot_293_view_factory_hook;
     *(uintptr_t *)(entry_293 + 0x08ull) = (uintptr_t)pilot_293_ctrl_factory_hook;
+
+    uint8_t *entry_260 =
+        g_page_table + PILOT_BUSY_SCREEN_ID * APPFW_PAGE_ENTRY_SIZE;
+    uintptr_t orig_260_ctrl = *(uintptr_t *)(entry_260 + 0x08ull);
+    if (orig_260_ctrl) {
+        g_orig_ctrl_factory_260 = (ctrl_factory_fn)orig_260_ctrl;
+        *(uintptr_t *)(entry_260 + 0x08ull) =
+            (uintptr_t)pilot_260_ctrl_factory_hook;
+    }
 
     /* 5. Hook TextSprite::setString(uint32_t) */
     void *sym_rid = dlsym(RTLD_DEFAULT, "_ZN2ux6gfxeng10TextSprite9setStringEj");
@@ -1523,6 +2386,8 @@ static PilotStatus install_pilot_menu_ui(void)
     g_orig_btn_right = (ctrl_event_fn)got_btn_right;
     g_orig_btn_left = (ctrl_event_fn)got_btn_left;
     g_orig_btn_back = (ctrl_event_fn)got_btn_back;
+    g_orig_btn_back2 = (ctrl_event_fn)got_btn_back2;
+    g_orig_1c3_confirm = (ctrl_event_fn)got_1c3_confirm;
 
     PilotStatus st = patch_got_ptr(g_appfw_base + APPFW_GOT_SET_STRING_RID,
                                    got_rid_val,
@@ -1539,6 +2404,10 @@ static PilotStatus install_pilot_menu_ui(void)
                         (uintptr_t)pilot_btn_left);
     (void)patch_got_ptr(g_appfw_base + APPFW_GOT_BTN_BACK, got_btn_back,
                         (uintptr_t)pilot_btn_back);
+    (void)patch_got_ptr(g_appfw_base + APPFW_GOT_BTN_BACK2, got_btn_back2,
+                        (uintptr_t)pilot_btn_back2);
+    (void)patch_got_ptr(g_appfw_base + APPFW_GOT_1C3_CONFIRM, got_1c3_confirm,
+                        (uintptr_t)pilot_1c3_confirm_hook);
 
     /* 6. Register group 0x535 and item IDs in non-setting runtime tree */
     g_tree_entry.group_id = PILOT_GROUP_ID;
@@ -1575,7 +2444,10 @@ static PilotStatus install_pilot_menu_ui(void)
         return st;
     }
 
-    ui_log("PILOT_UI_READY group=0x535 list=0x293 detail=0x1c3 nav=lifecycle-v1 focus=typed-layout-v2");
+    (void)install_pilot_option_2a7();
+    install_pilot_lv_ui();
+
+    ui_log("PILOT_UI_READY group=0x535 list=0x293 detail=0x1c3 nav=lifecycle-v1 focus=typed-layout-v2 lv=text-widget-v5");
     return PILOT_STATUS_OK;
 }
 
@@ -1586,8 +2458,11 @@ PilotStatus pilot_module_init(const PilotApi *api)
         api->struct_size < sizeof(PilotApi))
         return PILOT_STATUS_INVALID_ARGUMENT;
 
+    if (!api->version_string)
+        return PILOT_STATUS_INVALID_ARGUMENT;
     pthread_mutex_lock(&g_lock);
     if (!g_installed) {
+        g_version_components[0].label = api->version_string;
         g_api = api;
         PilotStatus st = install_pilot_menu_ui();
         if (st == PILOT_STATUS_OK)

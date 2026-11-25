@@ -176,14 +176,14 @@ python tools/pilot.py modules deploy private/a7c2_example.so --card D:/ \
   },
   "runtime": { "…完整复制 patch.a7c2.json 的 runtime 块…" },
   "patches": [ "…复制 patch.a7c2.json 的四项…" ],
-  "pilot_dso":     { "size_bytes": <N>, "sha256": "<build/pilot_a7c2.so 的 SHA-256>" },
+  "pilot_dso":     { "size_bytes": <N>, "sha256": "<build/pilot_a7c2.so 的 SHA-256>" },  /* 两项可选：缺省时只校验窗口、ELF 机种与标记 */
   "flash_writer":  { "size_bytes": <N>, "sha256": "<pilot_ap_flash.so 的 SHA-256>" }
 }
 ```
 
-`runtime` 块决定设备路径、默认结果头（`A7C2PILOTFLASH\n`）与 DSO 符号校验；若私有刷写器仍输出 `A6700PILOTFLASH\n`，在 `patch.json` 加 `"flash": {"header": "A6700PILOTFLASH\n"}` 覆盖。writer 与常驻 DSO 均不得超过 Jiritsu 的 64 KiB 传输上限。`--pilot` 省略时默认取 `build/<runtime.dso_soname>`。
+`runtime` 块决定设备路径、默认结果头（`A7C2PILOTFLASH\n`）与 DSO 符号校验；若私有刷写器仍输出 `A6700PILOTFLASH\n`，在 `patch.json` 加 `"flash": {"header": "A6700PILOTFLASH\n"}` 覆盖。writer 与常驻 DSO 均不得超过 Jiritsu 的 64 KiB 传输上限；合并上游后两者分开上传（`pilotflash-plan.bin` / `pilotflash-pilot.so`），限制不变。`--pilot` 省略时默认取 `build/<runtime.dso_soname>`。
 
-`target` 也接受按来源分列的写法：`accepted_sources` 是 `{profile, binary_sha256, patched_binary_sha256, size_bytes, note}` 的数组，安装器用 `patch/on_camera_profiles.py` 按整镜像 SHA-256 判定来源（`stock` 可省略，缺省时按 `target.binary_sha256` 补位）。公开的 `patch.a7c2.json` 已登记两个 2.01 来源：
+`target` 也接受按来源分列的写法：`accepted_sources` 是 `{profile, binary_sha256, patched_binary_sha256, size_bytes, note}` 的数组，`patch/on_camera_profiles.py` 负责校验与来源命名（`stock` 可省略，缺省时按 `target.binary_sha256` 补位）。合并上游后，安装器改用**补丁窗口拼接哈希**（`patches[].original_bytes/target_bytes`）判定状态，窗口字节相同的来源不登记也能安装；`accepted_sources` 保留为来源命名与离线校验用途，`flash check/install` 会打印`profile=stock|fl23|unknown`。公开的 `patch.a7c2.json` 已登记两个 2.01 来源：
 
 | profile | 源镜像 | 装 Pilot 后 |
 |---|---|---|
@@ -197,9 +197,19 @@ python tools/pilot.py flash check   --map F:/PilotLocal/a7c2/patch.json --transp
 python tools/pilot.py flash install --map F:/PilotLocal/a7c2/patch.json --writer <pilot_ap_flash.so> --pilot <pilot_a7c2.so> --transport-root <transport> --state-dir <state> --yes
 ```
 
+### 合并上游后的工具链
+
+上游 main 新增 `patch/prepare_ap.py`、通用刷写器 `patch/pilot_ap_flash.c`/`.so`、CP 刷写与 Live View 纯文本叠加。合并后：
+
+- `flash prepare-ap` 先读相机 AP、逐窗口比对，在 `ap-plan/` 生成匹配当前机身的 `patch.json`、补丁数据与通用刷写器；`flash install` 直接吃这份产物。
+- `run_flash_module()` 把补丁计划（`pilotflash-plan.bin`）、常驻 DSO（`pilotflash-pilot.so`）与 writer 分开上传，结束后校验并清理；三者仍各自受 64 KiB 单文件限制。
+- `patch/on_camera.py` 保留 A7C II 的 `runtime` 解析：`--map` 的 `runtime` 块决定设备路径（`/usr/lib/pilot_a7c2.so`）、结果头（`A7C2PILOTFLASH\n`）与 DSO 符号防呆；`--pilot` 省略时默认取 `build/<runtime.dso_soname>`。
+- SD 卡清单改名为 `modules.txt`、模块配置为 `config.txt`（Fsys 拒绝开 `.json`），内容仍是 JSON。
+- Live View 纯文本（`pilot_lv_ui.inc`、`pilot_lv_text_widget.inc`、`0x2A7` 选项弹窗、`0x260` 忙等框）只编进 A6700 后端，A7C II 后端不含这些文件。
+
 ## 9. 风险与未验项
 
-1. **刷写器不在本工作树**。`pilot_ap_flash.so` 是本机私有产物，内部窗口必须与上面四个窗口一致、按 A7C II 重新构建，并输出 `runtime.flash_header` 指定的结果头；本工作树无法验证其字节，因此 `flash install/restore/update-pilot` 一律未验收。
+1. **刷写器**。合并上游后仓库自带通用刷写器 `patch/pilot_ap_flash.so`（11,352 B，含 `pilot_ap_generic_v1` 标记），它按 `patch.json` 的窗口计划工作、不内嵌机型字节，所以 A7C II 不需要私有 writer。仍未验收的是实机：`flash install/restore/update-pilot` 一次都没跑过。
 2. **签名与信任链**。修改 `appFw.so` 会破坏该分区的校验；知识库记录了同机公钥、WBI 规则和 3.10 更新事故，`p1chksum` 的消费者仍未定位。**先 QEMU/离线验证，再谈实机**，并保留原文件备份与完整断电恢复手段。
 3. **未做实机加载**。DT_INIT 阶段 `dlopen` `pilot_a7c2.so`、constructor 建线程、`dlsym(RTLD_DEFAULT)` 命中 `libInfraFsys.so`、SD 卡盘符（`BXACDE`）与 disable 标记，都只做了静态与库导出层面的论证，尚无 A7C II 真机日志。
 4. **`dlerror` 仅在失败路径使用**：若进程全局解析不到，`x21=0` 会跳过错误文本写入，不影响正常加载。

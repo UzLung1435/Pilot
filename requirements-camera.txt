@@ -1,0 +1,3 @@
+pyusb
+pycryptodomex
+libusb-package

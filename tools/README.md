@@ -5,12 +5,22 @@
 | 内容 | 位置 |
 |---|---|
 | 通用 CLI、描述校验、RAM 运行器、合成示例和测试 | 公开仓库 `tools/` |
-| 机型注册表 | 仓库根 `models.json`、`tools/pilot_tool/models.py` |
 | 刷写入口与路径配置代码 | 公开仓库 `patch/on_camera.py`、`on_camera_config.py` |
-| 实机补丁描述、固件镜像、匹配的刷写器、USB transport | 本机外部目录，通过参数指定 |
+| 机型登记表与一致性校验 | 公开仓库 `models.json`、`patch/pilot_model.h`、`tools/pilot_tool/models.py` |
+| 机型补丁描述、通用刷写器、USB transport | 仓库中提供，可通过参数指定其他路径 |
 | 备份、日志、设备操作记录、生成模块 | 本机输出目录 |
 
 工具不会上传设备文件。公开同步使用 `public-files.json` 中的逐项清单，不同步研究目录或本机 `patch.json`。
+
+## 机型登记
+
+`models.json` 是机型身份的单一来源，`patch/pilot_model.h` 是它的 C 侧镜像，两者由校验器对齐：
+
+```sh
+python tools/pilot_tool/models.py --check
+```
+
+输出 `{"models": [...], "checked_definitions": N}`，任何一侧多出或缺少字段都会失败。机型决定 `pilot.so` 的文件名、ON_MOUNT/`get_api` 符号、模块机型标记、启动追踪路径与刷写头，所以两台机器之间不能互换产物。
 
 ## 描述与离线镜像
 
@@ -18,10 +28,6 @@
 python tools/pilot.py inspect tools/examples/file.synthetic.json
 python tools/pilot.py image private/patch.json private/appFw.before.so --out private/appFw.after.so
 python tools/pilot.py image private/patch.json private/appFw.after.so --restore --out private/appFw.restored.so
-
-# A7C II 2.01 的现成描述（原厂镜像由本机提供）
-python tools/pilot.py inspect patch.a7c2.image.json
-python tools/pilot.py image patch.a7c2.image.json private/ILCE-7CM2-2.01-appFw.so --out private/appFw.a7c2.so
 ```
 
 `pilot.patch.v1` 描述要求目标机型、固件、组件、文件大小和完整 SHA-256。
@@ -49,32 +55,29 @@ CP 地址是绝对地址，目前使用 SDK 支持的可写数据区。每项最
 
 ```sh
 python tools/pilot.py modules list --card D:/
-python tools/pilot.py modules deploy private/a7c2_example.so --card D:/ --model a7c2 --sha256 <模块SHA256> --backup-dir F:/PilotLocal/backups
+python tools/pilot.py modules deploy private/pilot_example.so --card D:/ --sha256 <模块SHA256> --backup-dir F:/PilotLocal/backups
 python tools/pilot.py logs --card D:/ --out F:/PilotLocal/logs/session-1
 ```
 
 部署检查模块 SHA-256、ELF64 AArch64 和现有清单，先将原模块和清单备份到卡外目录。
 更新模块时保留原有加载顺序，再回读模块并原子替换清单。
-清单文件是 `/pilot/modules.txt`（内容为 JSON），因为相机 Fsys 会拒绝打开 `.json`（`0x80000041`）；卡上遗留的旧 `modules.json` 会被读出并把内容同时写入两者，便于迁移。详见 [使用说明](../docs/USAGE.md)。
+清单文件名是 `/pilot/modules.txt`（内容仍是 JSON）：相机 Fsys 会拒绝打开 `.json`。
 日志导出只复制 Pilot 主日志及清单模块对应的 `module.log`。
-
-`--model` 从 `models.json` 取机型，要求模块导出且仅导出 `pilot_module_model_<model>`，并拒绝以其它机型 ID 开头的文件名。
-不带 `--model` 时保持原有行为（不校验机型）；相机端 `pilot_load_modules()` 仍会在 `pilot_module_init` 之前做 `dlsym` 硬校验。
 
 ## 相机刷写入口
 
-`flash` 调用已有 `on_camera.py`；机型由 `--map` 的 `target` 与 `runtime` 块共同决定，A6700 2.00 与 A7C II 2.01 共用同一套检查、安装、更新与恢复流程，但常驻 DSO 路径、结果头和符号校验按机型不同：
+`flash` 调用已有 `on_camera.py`，保留其针对 A6700 的检查、安装、更新与恢复流程：
 
 ```sh
 python tools/pilot.py flash check --map F:/PilotLocal/patch.json --transport-root F:/PilotLocal/transport --state-dir F:/PilotLocal/device-state
 python tools/pilot.py flash install --map F:/PilotLocal/patch.json --writer F:/PilotLocal/pilot_ap_flash.so --pilot F:/PilotLocal/pilot.so --transport-root F:/PilotLocal/transport --state-dir F:/PilotLocal/device-state --yes
 ```
 
-刷写入口使用现有 `pilot.patch-map.v1`，与通用补丁描述 `pilot.patch.v1` 分开。
-`--map` 必须提供匹配固件的完整描述和产物哈希；公开说明用的 `patch.a6700.json` / `patch.a7c2.json` 不含完整安装产物信息。A7C II 另附 `patch.a7c2.image.json` 供离线镜像校验。
+A7C II 的流程相同，把 `patch.json` 换成按 `patch.a7c2.json` 预检生成的配置、把 `pilot.so` 换成 `pilot_a7c2.so` 即可；生成的配置里带着本机 `runtime` 机型块（文件路径、符号名、刷写头、启动追踪路径），工具不读 `models.json` 猜路径。
 
-机型相关的 `runtime` 块必须完整复制：它给出 `model_id`、常驻 DSO 路径/文件名、四个引导与模块符号、启动追踪路径和默认结果头（`a7c2` 为 `A7C2PILOTFLASH\n`）。`flash.header` 可覆盖结果头；不带 `runtime` 的旧 A6700 配置仍沿用 `/usr/lib/pilot.so` 与 `A6700PILOTFLASH\n`。刷写前还会扫描常驻 DSO 的导出符号，缺本机型符号或含其它机型 marker 都会拒绝安装。
-USB transport 由本机提供 `cpload_run.py`。帮助、离线校验和 SD 卡操作不加载该依赖。
+刷写入口使用现有 `pilot.patch-map.v1`，与通用补丁描述 `pilot.patch.v1` 分开。
+`--map` 必须提供匹配固件的完整描述和产物哈希；公开说明用的 `patch.a6700.json`、`patch.a7c2.json` 不含完整安装产物信息。`patch.a7c2.json` 另有 `target.accepted_sources`：按补丁窗口逐字节比对，因此原厂与其它已验证来源（如 FL23）共用同一套窗口。
+仓库的 `patch/cpload_run.py` 提供 USB transport，依赖安装方式见 `requirements-camera.txt`。帮助、离线校验和 SD 卡操作不加载该依赖。
 真实写入前备份涉及的原文件，设备状态单独写入 `--state-dir/device-state.json`，不改补丁描述。
 
 ## 公开版同步与验证
@@ -82,7 +85,6 @@ USB transport 由本机提供 `cpload_run.py`。帮助、离线校验和 SD 卡�
 ```sh
 python tools/sync_public.py --destination /path/to/public-Pilot --write
 python tools/sync_public.py --destination /path/to/public-Pilot
-python tools/pilot_tool/models.py --check
 python -m unittest discover -s tools/tests -p 'test_*.py'
 python -m unittest discover -s patch/tests -p test_on_camera_offline.py
 cc -std=c11 -O2 -Wall -Wextra -Werror -I patch -I tools/runtime tools/runtime/pilot_patch_runtime.c tools/tests/test_runtime.c -o /tmp/pilot-runtime-test

@@ -32,9 +32,9 @@ def add_path_arguments(parser: argparse.ArgumentParser) -> None:
 def resolve_paths(args: argparse.Namespace, repo_root: Path) -> CameraPaths:
     build = repo_root / "build"
     return CameraPaths(
-        patch_map=args.map_path or repo_root / "patch.json",
-        writer=args.writer or build / "pilot_ap_flash.so",
+        patch_map=args.map_path or repo_root / "patch.a6700.json",
+        writer=args.writer or repo_root / "patch" / "pilot_ap_flash.so",
         pilot=args.pilot or build / "pilot.so",
         state_dir=args.state_dir or build / "device-state",
-        transport_root=args.transport_root or repo_root.parent / "fl2_fl3",
+        transport_root=args.transport_root or repo_root / "patch",
     )

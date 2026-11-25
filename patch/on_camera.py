@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Check, install, restore, or clean a Pilot AP startup patch.
-
-The target model, firmware, patch windows and model identity come from the
-local --map file. One entry point serves every registered body, but the DSO
-path, export names, module tag and writer header are model-specific so a
-wrong-body bootstrap or module is rejected before any write.
-"""
+"""Manage Pilot and the configured AP and CP camera patches."""
 
 from __future__ import annotations
 
@@ -29,7 +23,7 @@ PATCH_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PATCH_DIR.parent
 MAP_PATH = REPO_ROOT / "patch.json"
 PILOT_DSO_PATH = REPO_ROOT / "build" / "pilot.so"
-FLASH_MODULE_PATH = REPO_ROOT / "build" / "pilot_ap_flash.so"
+FLASH_MODULE_PATH = REPO_ROOT / "patch" / "pilot_ap_flash.so"
 STATE_DIR = REPO_ROOT / "build" / "device-state"
 AP_PATH = "/tmp/jiritsu/../../usr/lib/appFw.so"
 PILOT_DEVICE_PATH = "/tmp/jiritsu/../../usr/lib/pilot.so"
@@ -38,9 +32,10 @@ FLASH_FILES = {
     "staged": "/tmp/jiritsu/pilotflash-staged.so",
     "mode": "/tmp/jiritsu/pilotflash.mode",
     "result": "/tmp/jiritsu/pilotflash.result",
+    "plan": "/tmp/jiritsu/pilotflash-plan.bin",
+    "pilot": "/tmp/jiritsu/pilotflash-pilot.so",
 }
-DEFAULT_FLASH_HEADER = b"A6700PILOTFLASH\n"
-FLASH_HEADER = DEFAULT_FLASH_HEADER
+FLASH_HEADER = b"A6700PILOTFLASH\n"
 FLASH_POLL_SECONDS = 120
 
 # A map without a "runtime" block is the original, camera-verified A6700 2.00
@@ -64,13 +59,9 @@ LEGACY_RUNTIME = {
 }
 RUNTIME_KEYS = frozenset(LEGACY_RUNTIME)
 MODEL_RUNTIME = LEGACY_RUNTIME
-MODEL_FLASH_HEADER = DEFAULT_FLASH_HEADER
+MODEL_FLASH_HEADER = b"A6700PILOTFLASH\n"
 PILOT_DSO_DISPLAY_PATH = LEGACY_RUNTIME["dso_path"]
 PILOT_JIRITSU_PREFIX = "/tmp/jiritsu/../.."
-
-def sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
 
 def nul_strings(data: bytes) -> set[str]:
     """Printable NUL-terminated strings in an ELF (dynsym names included)."""
@@ -121,7 +112,14 @@ def configure_model(patch_map: dict) -> dict:
 
 
 def validate_pilot_dso(pilot: bytes, patch_map: dict) -> None:
-    """Refuse a DSO built for another body before it reaches the camera."""
+    """Refuse a DSO built for another body before it reaches the camera.
+
+    Maps without a ``runtime`` block are the historical, camera-verified A6700
+    descriptions; their DSO is accepted as before. Model-specific maps state the
+    identity, so a mismatched or foreign DSO is refused here.
+    """
+    if not patch_map.get("runtime"):
+        return
     runtime = resolve_runtime(patch_map)
     names = nul_strings(pilot)
     required = (runtime["marker_symbol"], runtime["mount_callback_symbol"],
@@ -156,6 +154,10 @@ def configure_flash_header(patch_map: dict) -> None:
             b"\n" not in header):
         raise RuntimeError("flash.header must be a short ASCII line (<=32 bytes)")
     FLASH_HEADER = header
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def load_map() -> dict:
@@ -237,8 +239,9 @@ def load_transport(transport_root: Path):
 def load_writer(patch_map: dict) -> bytes:
     writer = FLASH_MODULE_PATH.read_bytes()
     writer_meta = patch_map.get("flash_writer")
-    if not writer_meta or len(writer) != writer_meta.get("size_bytes") or \
-            sha256(writer) != writer_meta.get("sha256"):
+    if writer_meta is not None and (
+            len(writer) != writer_meta.get("size_bytes") or
+            sha256(writer) != writer_meta.get("sha256")):
         raise RuntimeError("AP writer differs from the artifact recorded in patch.json")
     if len(writer) > 65536:
         raise RuntimeError("AP writer exceeds the Jiritsu 64 KiB transfer limit")
@@ -246,23 +249,92 @@ def load_writer(patch_map: dict) -> bytes:
         raise RuntimeError("AP writer is not an ELF64 module")
     if int.from_bytes(writer[18:20], "little") != 183:
         raise RuntimeError("AP writer is not an AArch64 module")
+    if b"pilot_ap_generic_v1\0" not in writer:
+        raise RuntimeError("generic AP writer required")
     return writer
 
 
 def load_pilot(patch_map: dict) -> bytes:
-    soname = resolve_runtime(patch_map)["dso_soname"]
     pilot = PILOT_DSO_PATH.read_bytes()
-    pilot_meta = patch_map["pilot_dso"]
-    if len(pilot) != pilot_meta["size_bytes"] or sha256(pilot) != pilot_meta["sha256"]:
-        raise RuntimeError(f"{soname} differs from the DSO recorded in patch.json")
+    pilot_meta = patch_map.get("pilot_dso")
+    if pilot_meta is not None and (
+            len(pilot) != pilot_meta.get("size_bytes") or
+            sha256(pilot) != pilot_meta.get("sha256")):
+        raise RuntimeError("pilot.so differs from the DSO recorded in patch.json")
     if len(pilot) > 65536:
-        raise RuntimeError(f"{soname} exceeds the Jiritsu 64 KiB transfer limit")
+        raise RuntimeError(f"{resolve_runtime(patch_map)['dso_soname']} "
+                           "exceeds the Jiritsu 64 KiB transfer limit")
     validate_pilot_dso(pilot, patch_map)
     return pilot
 
 
+def parse_offset(value: int | str) -> int:
+    return int(value, 0) if isinstance(value, str) else int(value)
+
+
+def iter_patch_windows(patch_map: dict) -> list[tuple[str, int, bytes, bytes]]:
+    windows: list[tuple[str, int, bytes, bytes]] = []
+    for entry in patch_map.get("patches", []):
+        offset = parse_offset(entry["file_offset"])
+        length = int(entry["length"])
+        original = bytes.fromhex(entry["original_bytes"])
+        target = bytes.fromhex(entry["target_bytes"])
+        if offset < 0 or length <= 0 or len(original) != length or len(target) != length:
+            raise ValueError(f"invalid patch window: {entry.get('id', 'unknown')}")
+        windows.append((str(entry["id"]), offset, original, target))
+    return windows
+
+
+def window_hashes(data: bytes, patch_map: dict) -> dict:
+    windows = iter_patch_windows(patch_map)
+    if not windows:
+        raise ValueError("patch map contains no AP patch windows")
+    actual_parts: list[bytes] = []
+    baseline_parts: list[bytes] = []
+    patched_parts: list[bytes] = []
+    mismatches: list[dict] = []
+    for name, offset, original, target in windows:
+        length = len(original)
+        if offset + length > len(data):
+            raise ValueError(f"patch window {name} exceeds appFw.so size ({len(data)})")
+        actual = data[offset:offset + length]
+        actual_parts.append(actual)
+        baseline_parts.append(original)
+        patched_parts.append(target)
+        if actual != original and actual != target:
+            mismatches.append({
+                "id": name,
+                "offset": offset,
+                "length": length,
+                "actual": actual,
+                "expected_original": original,
+                "expected_target": target,
+            })
+    return {
+        "actual_sha256": sha256(b"".join(actual_parts)),
+        "baseline_sha256": sha256(b"".join(baseline_parts)),
+        "patched_sha256": sha256(b"".join(patched_parts)),
+        "mismatches": mismatches,
+    }
+
+
 def ap_state(data: bytes, patch_map: dict) -> str:
-    return classify(data, patch_map)[0]
+    target = patch_map["target"]
+    if len(data) != target["binary_size"]:
+        return "unknown"
+    hashes = window_hashes(data, patch_map)
+    if hashes["actual_sha256"] == hashes["baseline_sha256"]:
+        return "baseline"
+    if hashes["actual_sha256"] == hashes["patched_sha256"]:
+        return "patched"
+    return "unknown"
+
+
+def camera_profile(data: bytes, patch_map: dict) -> str:
+    try:
+        return classify(data, patch_map)[1]
+    except ValueError:
+        return "unknown"
 
 
 def read_ap(session: cr.Session) -> bytes:
@@ -284,12 +356,17 @@ def remove_device_file(session: cr.Session, path: str) -> None:
     session.jiritsu(18, b"\0\xff", missing=True)
 
 
-def classify_owned_files(files: dict[str, bytes | None], writer: bytes) -> list[str]:
+def classify_owned_files(files: dict[str, bytes | None], writer: bytes,
+                         pilot: bytes | None = None, plan: bytes | None = None) -> list[str]:
     problems: list[str] = []
     for key, data in files.items():
         if data is None:
             continue
         if key in ("trigger", "staged") and data == writer:
+            continue
+        if key == "pilot" and pilot is not None and data == pilot:
+            continue
+        if key == "plan" and plan is not None and data == plan:
             continue
         if key == "mode" and data in (b"check\n", b"write\n", b"restore\n", b"pilot\n"):
             continue
@@ -299,9 +376,10 @@ def classify_owned_files(files: dict[str, bytes | None], writer: bytes) -> list[
     return problems
 
 
-def clean_owned_files(session: cr.Session, writer: bytes) -> None:
+def clean_owned_files(session: cr.Session, writer: bytes,
+                      pilot: bytes | None = None, plan: bytes | None = None) -> None:
     files = read_flash_files(session)
-    problems = classify_owned_files(files, writer)
+    problems = classify_owned_files(files, writer, pilot, plan)
     if problems:
         raise RuntimeError("; ".join(problems))
     for key, data in files.items():
@@ -323,16 +401,33 @@ def stage_pilot_dso(session: cr.Session, pilot: bytes,
                     patch_map: dict) -> bool:
     current = session.read_path(PILOT_DEVICE_PATH, missing=True)
     if current is not None and current != pilot:
-        raise RuntimeError(f"existing {PILOT_DSO_DISPLAY_PATH} differs from this build; inspect before replacing")
+        raise RuntimeError("existing /usr/lib/pilot.so differs from this build; inspect before replacing")
     print("persistent bootstrap: " + ("verified" if current == pilot else "will install in /usr/lib"))
     return current != pilot
 
 
-def run_flash_module(session: cr.Session, writer: bytes, mode: str) -> bytes:
+def run_flash_module(session: cr.Session, writer: bytes, mode: str,
+                     patch_map: dict | None = None, pilot: bytes | None = None) -> bytes:
     ensure_no_flash_files(session)
     staged_path = FLASH_FILES["staged"]
     mode_path = FLASH_FILES["mode"]
     trigger_path = FLASH_FILES["trigger"]
+
+    inputs: dict[str, bytes] = {}
+    if mode in ("write", "restore"):
+        if patch_map is None:
+            raise ValueError("AP patch map required")
+        from prepare_ap import plan_from_config
+        inputs["plan"] = plan_from_config(patch_map)
+    if mode in ("write", "pilot"):
+        if not pilot:
+            raise ValueError("pilot.so required")
+        inputs["pilot"] = pilot
+    for key, data in inputs.items():
+        session.select(FLASH_FILES[key])
+        session.jiritsu(16, b"\0\xff\0" + data)
+        if session.read_path(FLASH_FILES[key], missing=True) != data:
+            raise RuntimeError(f"AP writer {key} staging readback mismatch")
 
     session.select(mode_path)
     session.jiritsu(16, b"\0\xff\0" + (mode + "\n").encode("ascii"))
@@ -368,6 +463,12 @@ def run_flash_module(session: cr.Session, writer: bytes, mode: str) -> bytes:
         if key == "mode" and data != (mode + "\n").encode("ascii"):
             raise RuntimeError(f"{mode_path} changed during AP writer run")
         remove_device_file(session, FLASH_FILES[key])
+    for key, expected in inputs.items():
+        current = session.read_path(FLASH_FILES[key], missing=True)
+        if current is not None and current != expected:
+            raise RuntimeError(f"{FLASH_FILES[key]} changed during AP writer run")
+        if current is not None:
+            remove_device_file(session, FLASH_FILES[key])
     return result
 
 
@@ -383,32 +484,58 @@ def print_result(data: bytes) -> None:
         print(f"  {line}")
 
 
+def print_window_mismatch(data: bytes, patch_map: dict) -> None:
+    if len(data) != patch_map["target"]["binary_size"]:
+        print(f"WARNING: appFw.so size {len(data)} != expected {patch_map['target']['binary_size']}")
+        return
+    hashes = window_hashes(data, patch_map)
+    print(f"WARNING: patch window hash mismatch:")
+    print(f"  actual   windows sha256: {hashes['actual_sha256']}")
+    print(f"  baseline windows sha256: {hashes['baseline_sha256']}")
+    print(f"  patched  windows sha256: {hashes['patched_sha256']}")
+    for item in hashes["mismatches"]:
+        print(f"  differ: {item['id']} offset={hex(item['offset'])} length={item['length']}")
+
+
+def with_actual_windows(patch_map: dict, data: bytes, mode: str) -> dict:
+    """Return a copy of patch_map with actual on-camera window bytes for forced writes."""
+    field = "original_bytes" if mode == "write" else "target_bytes"
+    updated_patches = []
+    for entry in patch_map["patches"]:
+        offset = parse_offset(entry["file_offset"])
+        length = int(entry["length"])
+        copied = dict(entry)
+        copied[field] = data[offset:offset + length].hex()
+        updated_patches.append(copied)
+    updated = dict(patch_map)
+    updated["patches"] = updated_patches
+    return updated
+
+
 def record_camera_state(patch_map: dict, mode: str, before_hash: str,
                         after_hash: str, result: bytes,
-                        profile: str | None = None) -> None:
+                        profile: str = "unknown") -> None:
     applied = mode == "write"
-    sources = {row["profile"]: row for row in source_profiles(patch_map)}
-    source = sources.get(profile or "", {})
+    target = patch_map["target"]
+    baseline_sha = target.get("binary_sha256")
+    patched_sha = target.get("patched_binary_sha256")
+    if (baseline_sha is None or patched_sha is None) and patch_map.get("patches"):
+        windows = iter_patch_windows(patch_map)
+        baseline_sha = baseline_sha or sha256(b"".join(orig for _, _, orig, _ in windows))
+        patched_sha = patched_sha or sha256(b"".join(tgt for _, _, _, tgt in windows))
     save_device_state({
         "schema": "pilot.device-state.v1",
         "status": "applied_pending_power_cycle" if applied
                   else "restored_pending_power_cycle",
-        "target": patch_map["target"].get("model"),
-        "firmware": patch_map["target"].get("firmware"),
+        "target": target.get("model"),
+        "firmware": target.get("firmware"),
         "camera_applied": applied,
-        "source_profiles": [
-            {key: row[key] for key in
-             ("profile", "binary_sha256", "patched_binary_sha256")}
-            for row in source_profiles(patch_map)
-        ],
+        "source_profiles": [item["profile"] for item in source_profiles(patch_map)],
         "camera_installation": {
             "last_operation": "install" if applied else "restore",
             "source_profile": profile,
-            "baseline_sha256": source.get(
-                "binary_sha256", patch_map["target"]["binary_sha256"]),
-            "patched_sha256": source.get(
-                "patched_binary_sha256",
-                patch_map["target"]["patched_binary_sha256"]),
+            "baseline_sha256": baseline_sha,
+            "patched_sha256": patched_sha,
             "before_sha256": before_hash,
             "after_sha256": after_hash,
             "writer_result": result.decode("ascii", "replace").strip(),
@@ -419,41 +546,57 @@ def record_camera_state(patch_map: dict, mode: str, before_hash: str,
 
 def run_check(session: cr.Session, patch_map: dict) -> int:
     data = read_ap(session)
-    state, profile = classify(data, patch_map)
+    state = ap_state(data, patch_map)
+    profile = camera_profile(data, patch_map)
     print(f"appFw.so: {len(data)} bytes sha256={sha256(data)}")
+    if len(data) == patch_map["target"]["binary_size"] and patch_map.get("patches"):
+        hashes = window_hashes(data, patch_map)
+        print(f"actual windows sha256: {hashes['actual_sha256']}")
     if state == "unknown":
-        print(f"state: unknown; accepted sources: {describe(patch_map)}")
-        print("no files were written")
+        print_window_mismatch(data, patch_map)
+        print(f"accepted sources: {describe(patch_map)}")
+        print(f"state: unknown profile={profile}; no files were written")
         return 3
     print(f"state: {state} profile={profile}")
     if state == "patched":
         bootstrap = session.read_path(PILOT_DEVICE_PATH, missing=True)
-        expected = patch_map["pilot_dso"]
         if bootstrap is None:
-            print(f"persistent bootstrap: missing {PILOT_DSO_DISPLAY_PATH}")
+            print("persistent bootstrap: missing /usr/lib/pilot.so")
             return 4
         digest = sha256(bootstrap)
         print(f"persistent bootstrap: {len(bootstrap)} bytes sha256={digest}")
-        if len(bootstrap) != expected["size_bytes"] or digest != expected["sha256"]:
+        expected = patch_map.get("pilot_dso")
+        if expected is not None and (
+                len(bootstrap) != expected["size_bytes"] or digest != expected["sha256"]):
             print("persistent bootstrap: mismatch")
             return 4
     return 0
 
 
 def run_write(session: cr.Session, patch_map: dict, writer: bytes,
-              pilot: bytes, mode: str) -> int:
+              pilot: bytes, mode: str, force: bool = False) -> int:
     preload = session.read_path("/tmp/jiritsu/../../etc/ld.so.preload", missing=True)
     if preload:
         raise RuntimeError("/etc/ld.so.preload exists; refusing to invoke Jiritsu loader")
 
     before = read_ap(session)
     before_hash = sha256(before)
-    state, profile = classify(before, patch_map)
-    print(f"before appFw: {len(before)} bytes sha256={before_hash} "
-          f"state={state} profile={profile}")
+    state = ap_state(before, patch_map)
+    before_profile = camera_profile(before, patch_map)
+    print(f"before appFw: {len(before)} bytes sha256={before_hash} state={state} "
+          f"profile={before_profile}")
+    effective_map = patch_map
     if state == "unknown":
-        raise RuntimeError("appFw matches neither an accepted camera image "
-                           f"({describe(patch_map)}) nor a Pilot-patched image")
+        print_window_mismatch(before, patch_map)
+        print(f"accepted sources: {describe(patch_map)}")
+        if len(before) != patch_map["target"]["binary_size"]:
+            raise RuntimeError("appFw size does not match target binary_size")
+        if not force:
+            raise RuntimeError(
+                "AP patch windows do not match expected baseline or patched hash; pass --force to override"
+            )
+        print("WARNING: --force enabled; proceeding with actual on-camera window bytes")
+        effective_map = with_actual_windows(patch_map, before, mode)
 
     if mode == "write":
         ensure_no_flash_files(session)
@@ -468,13 +611,13 @@ def run_write(session: cr.Session, patch_map: dict, writer: bytes,
         return 0
 
     backup_device_files({"appFw.so": before, "pilot.so": session.read_path(PILOT_DEVICE_PATH, missing=True)})
-    result = run_flash_module(session, writer, mode)
+    result = run_flash_module(session, writer, mode, effective_map, pilot)
     print_result(result)
     after = read_ap(session)
     after_hash = sha256(after)
-    after_state, after_profile = classify(after, patch_map)
-    print(f"after appFw:  {len(after)} bytes sha256={after_hash} "
-          f"state={after_state} profile={after_profile}")
+    after_state = ap_state(after, patch_map)
+    print(f"after appFw:  {len(after)} bytes sha256={after_hash} state={after_state} "
+          f"profile={camera_profile(after, patch_map)}")
 
     expected_state = "patched" if mode == "write" else "baseline"
     if b"RESULT=OK" not in result or after_state != expected_state:
@@ -486,7 +629,7 @@ def run_write(session: cr.Session, patch_map: dict, writer: bytes,
 
     if mode == "write":
         if session.read_path(PILOT_DEVICE_PATH, missing=True) != pilot:
-            raise RuntimeError(f"persistent {PILOT_DSO_DISPLAY_PATH} readback mismatch")
+            raise RuntimeError("persistent /usr/lib/pilot.so readback mismatch")
         pilot_state = {
             "schema": "pilot.device-state.v1",
             "last_operation": "install",
@@ -498,13 +641,12 @@ def run_write(session: cr.Session, patch_map: dict, writer: bytes,
             "camera_stage_readback_verified": True,
             "camera_stage_activation": "not_confirmed",
             "camera_candidate_state": "staged_readback_verified_power_cycle_pending",
-            "camera_persistent_path": PILOT_DSO_DISPLAY_PATH,
+            "camera_persistent_path": "/usr/lib/pilot.so",
         }
         save_device_state(pilot_state)
         print(f"persistent bootstrap readback OK: {len(pilot)} bytes sha256={sha256(pilot)}")
 
-    record_camera_state(patch_map, mode, before_hash, after_hash, result,
-                        profile)
+    record_camera_state(patch_map, mode, before_hash, after_hash, result, before_profile)
 
     remove_result_if_matches(session, result)
     if mode == "write":
@@ -524,11 +666,11 @@ def run_update_pilot(session: cr.Session, patch_map: dict,
     ensure_no_flash_files(session)
     current = session.read_path(PILOT_DEVICE_PATH, missing=True)
     if current == pilot:
-        print(f"persistent {PILOT_DSO_DISPLAY_PATH} already matches: {len(pilot)} bytes sha256={sha256(pilot)}")
+        print(f"persistent /usr/lib/pilot.so already matches: {len(pilot)} bytes sha256={sha256(pilot)}")
         return 0
 
     backup_device_files({"pilot.so": current})
-    result = run_flash_module(session, writer, "pilot")
+    result = run_flash_module(session, writer, "pilot", pilot=pilot)
     print_result(result)
     if b"RESULT=OK" not in result:
         return 6
@@ -550,34 +692,74 @@ def run_update_pilot(session: cr.Session, patch_map: dict,
     })
     remove_result_if_matches(session, result)
     print(f"PILOT UPDATE OK: {len(pilot)} bytes sha256={sha256(pilot)}")
-    print(f"fully power-cycle the camera to load the updated {PILOT_DSO_DISPLAY_PATH}")
+    print("fully power-cycle the camera to load the updated /usr/lib/pilot.so")
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--check", action="store_true", help="read-only full appFw hash check")
+    group.add_argument("--check", action="store_true", help="read-only AP patch window hash check")
     group.add_argument("--install", action="store_true", help="stage Pilot and install the AP patch")
     group.add_argument("--restore", action="store_true", help="restore the four original AP windows")
-    group.add_argument("--update-pilot", action="store_true", help="update the model-specific Pilot DSO in place")
+    group.add_argument("--update-pilot", action="store_true", help="update /usr/lib/pilot.so in place")
     group.add_argument("--clean", action="store_true", help="remove recognized Pilot flash staging files")
-    parser.add_argument("--yes", action="store_true", help="required for --install, --restore, and --update-pilot")
+    group.add_argument("--prepare-ap", action="store_true", help="read AP and prepare a camera-specific patch and writer")
+    group.add_argument("--cp-check", action="store_true", help="check configured CP patch")
+    group.add_argument("--cp-install", action="store_true", help="install configured CP patch")
+    group.add_argument("--cp-restore", action="store_true", help="restore configured CP patch")
+    parser.add_argument("--yes", action="store_true", help="required for write operations")
+    parser.add_argument("--force", action="store_true", help="allow AP install/restore when patch windows differ from expected")
+    parser.add_argument("--output-dir", type=Path, help="new directory for the AP preparation")
     add_path_arguments(parser)
     args = parser.parse_args()
 
-    if (args.install or args.restore or args.update_pilot) and not args.yes:
-        parser.error("--install, --restore, and --update-pilot require --yes")
+    if (args.install or args.restore or args.update_pilot or args.cp_install or args.cp_restore) and not args.yes:
+        parser.error("write operations require --yes")
     paths = resolve_paths(args, REPO_ROOT)
-    explicit_pilot = args.pilot is not None
     global MAP_PATH, PILOT_DSO_PATH, FLASH_MODULE_PATH, STATE_DIR
     MAP_PATH = paths.patch_map
     PILOT_DSO_PATH = paths.pilot
     FLASH_MODULE_PATH = paths.writer
     STATE_DIR = paths.state_dir
+    if args.prepare_ap:
+        if args.output_dir is None:
+            parser.error("--prepare-ap requires --output-dir")
+        import prepare_ap
+        patch_map = load_map()
+        pilot = PILOT_DSO_PATH.read_bytes()
+        cr = load_transport(paths.transport_root)
+        with cr.Session(skip_hasp=True) as session:
+            image = read_ap(session)
+        writer = FLASH_MODULE_PATH.read_bytes()
+        result = prepare_ap.prepare(patch_map, image, pilot, args.output_dir, writer)
+        if result["already_installed"]:
+            print("AP patch windows already match the target; no preparation files created.")
+        else:
+            print(f"AP preparation: {result['directory']}")
+        print(f"before sha256={result['before_sha256']}")
+        print(f"after  sha256={result['after_sha256']}")
+        for item in result["windows"]:
+            print(f"  {item['id']} offset={item['file_offset']} length={item['length']} state={item['state']} differences={item['different_bytes']}")
+            if item["state"] == "different":
+                for diff in item["differences"][:16]:
+                    print(f"    {diff['file_offset']}: actual={diff['actual']} declared={diff['declared_original']} target={diff['target']}")
+                if len(item["differences"]) > 16 and not result["already_installed"]:
+                    print("    More differences are listed in preflight-report.json")
+        if not result["already_installed"]:
+            print("Review preflight-report.json before choosing whether to install.")
+        return 0
+    if args.cp_check or args.cp_install or args.cp_restore:
+        import cp_flash
+        spec = cp_flash.load_config(MAP_PATH)
+        cr = load_transport(paths.transport_root)
+        action = "install" if args.cp_install else "restore" if args.cp_restore else "check"
+        with cr.Session(skip_hasp=True) as session:
+            cp_flash.run(session, spec, action, STATE_DIR / "cp-backups")
+        return 0
     patch_map = load_map()
     runtime = configure_model(patch_map)
-    if not explicit_pilot:
+    if args.pilot is None:
         PILOT_DSO_PATH = REPO_ROOT / "build" / runtime["dso_soname"]
     configure_flash_header(patch_map)
     writer = None if args.check else load_writer(patch_map)
@@ -588,9 +770,12 @@ def main() -> int:
           "/usr/lib/appFw.so")
     print(f"model: {runtime['model_id']}  DSO: {runtime['dso_path']}  "
           f"module tag: {runtime['module_model_symbol']}")
-    print(f"baseline sha256: {patch_map['target']['binary_sha256']}")
-    print(f"patched sha256: {patch_map['target']['patched_binary_sha256']}")
-    print(f"accepted sources: {describe(patch_map)}")
+    if patch_map.get("patches"):
+        windows = iter_patch_windows(patch_map)
+        print(f"baseline windows sha256: {sha256(b''.join(orig for _, _, orig, _ in windows))}")
+        print(f"patched  windows sha256: {sha256(b''.join(tgt for _, _, _, tgt in windows))}")
+    if patch_map.get("accepted_sources"):
+        print(f"accepted sources: {describe(patch_map)}")
     if writer is not None:
         print(f"AP writer: {len(writer)} bytes sha256={sha256(writer)}")
     if pilot:
@@ -602,14 +787,18 @@ def main() -> int:
             return run_check(session, patch_map)
         if args.clean:
             assert writer is not None
-            clean_owned_files(session, writer)
+            from prepare_ap import plan_from_config
+            staged = read_flash_files(session)
+            clean_pilot = load_pilot(patch_map) if staged["pilot"] is not None else None
+            clean_plan = plan_from_config(patch_map) if staged["plan"] is not None else None
+            clean_owned_files(session, writer, clean_pilot, clean_plan)
             return 0
         if args.update_pilot:
             assert writer is not None
             return run_update_pilot(session, patch_map, writer, pilot)
         assert writer is not None
         return run_write(session, patch_map, writer, pilot,
-                         "write" if args.install else "restore")
+                         "write" if args.install else "restore", force=args.force)
 
 
 if __name__ == "__main__":

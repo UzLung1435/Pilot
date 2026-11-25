@@ -12,6 +12,7 @@ extern "C" {
 #endif
 
 #define PILOT_ABI_VERSION 2u
+#define PILOT_VERSION_STRING "Pilot v0.2.0"
 #define PILOT_MODULE_INIT_SYMBOL "pilot_module_init"
 #define PILOT_MODULE_FILE_TRANSFER_MAX (1024u * 1024u)
 #define PILOT_CP_MEM_TRANSFER_MAX 4096u
@@ -94,6 +95,16 @@ struct PilotModuleLogApi {
                          const char *message);
 };
 
+typedef void (*PilotCpMemCallback)(PilotStatus status, void *user_data);
+
+/* CP RAM read/write/patch:
+ * - Code/.rodata addresses 0x00128000..0x011D7FFF (excluding 0x00C12D68..0x00C12FBF)
+ *   use the CP UIPC v3/v4 DACR patcher (route 0x90030001, status 0x00C12FA0).
+ * - Other data addresses >= 0x01000000 use /dev/pcidma directly.
+ * - write_async/patch_async deep-copy input buffers, run on a detached worker
+ *   thread without blocking the caller, and invoke callback(status, user_data).
+ *   Callers must ensure user_data outlives the callback (static/global/heap).
+ */
 struct PilotCpMemApi {
     uint32_t struct_size;
     uint32_t reserved;
@@ -103,6 +114,17 @@ struct PilotCpMemApi {
                          const void *expected,
                          const void *replacement,
                          size_t length);
+    PilotStatus (*write_async)(uint64_t cp_address,
+                               const void *input,
+                               size_t length,
+                               PilotCpMemCallback callback,
+                               void *user_data);
+    PilotStatus (*patch_async)(uint64_t cp_address,
+                               const void *expected,
+                               const void *replacement,
+                               size_t length,
+                               PilotCpMemCallback callback,
+                               void *user_data);
 };
 
 typedef struct PilotApi {
@@ -131,6 +153,7 @@ typedef struct PilotApi {
     const PilotLogApi *log;
     const PilotModuleLogApi *mlog;
     const PilotCpMemApi *cp_mem;
+    const char *version_string;
 } PilotApi;
 
 typedef PilotStatus (*PilotModuleInit)(const PilotApi *api);

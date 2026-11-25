@@ -15,6 +15,16 @@
 - **A7C II 支持两种在役来源（原厂 / FL23）**：新增 `patch/on_camera_profiles.py`，`patch.json` 的 `target` 可用 `accepted_sources` 按 `profile` 登记多份 `binary_sha256`/`patched_binary_sha256`；安装器与 `--check` 按整镜像哈希判定来源并打印 `profile=stock|fl23`，未登记镜像仍被拒绝。公开的 `patch.a7c2.json` 已登记 `stock`（`2ea02f7e…`→`48da7988…`）与 `fl23`（`1aaeb8fb…`→`cee59303…`）。
 - FL23 是 A7C II 2.01 的 FL2/FL3 Creative Look 移植，对 `appFw.so` 的 8 处原地改写与 MenuUI 校验的全部地址零重叠，因此同一套补丁窗口与同一份模块在两种来源上都成立；`modules/menu_ui/tests/verify_a7c2_offsets.py` 先按哈希认来源，两份镜像各 120 项全通过，并新增 `--allow-unknown-source`。
 - MenuUI 的 A7C II 后端在安装时对 FL23 的 8 个窗口做 FNV-1a 64 指纹，日志记 `appFw source profile=stock|fl23`；指纹不符只告警，逐站点契约校验仍是闸门。指纹常量由 `work/menu_ui_a7c2/fl23_signature.py` 推导并可回读头文件自检。
+- **合并上游 main（`98e3528`）**：引入 `patch/prepare_ap.py`（读相机 AP 生成配套 `patch.json`、补丁数据与通用刷写器）、通用刷写器 `patch/pilot_ap_flash.c`/`.so`（`pilot_ap_generic_v1`）、CP 刷写（`patch/cp_flash.py`、`cpdelta.so`、`cpload_run.py`）、Live View 纯文本叠加（`pilot_lv_ui.inc`、`pilot_lv_text_widget.inc`、`0x2A7` 选项弹窗、`0x260` 忙等框）与 `modules/video_modes`。冲突的 5 个文件按上游侧重建后重放本分支改动。
+- 安装器状态判定改为**补丁窗口拼接哈希**：`patches[].original_bytes/target_bytes` 决定 `baseline`/`patched`/`unknown`，窗口字节相同的来源（原厂、FL23）不必登记即可安装；窗口不符时可用 `--force` 按实机窗口继续。`accepted_sources` 转为来源命名与离线校验用途，`load_map()` 仍校验其格式，`flash check/install` 打印 `profile=stock|fl23|unknown`。
+- `flash install/update-pilot` 把补丁计划（`pilotflash-plan.bin`）、常驻 DSO（`pilotflash-pilot.so`）与 writer 分开上传并在结束后校验清理；`pilot_dso`/`flash_writer` 的哈希元数据变为可选。三者各自仍受 64 KiB 单文件限制。
+- MenuUI 双后端共存于一份构建脚本：`PILOT_MODEL=a6700` 编 A6700 后端（含 Live View 纯文本与选项弹窗），`PILOT_MODEL=a7c2` 编 `a7c2/pilot_menu_ui_a7c2.c`（不含 LV）；两者共用 `PILOT_MANIFEST_NAME`（`modules.txt`）与 `PILOT_MODULE_CONFIG_NAME`（`config.txt`）。
+- 离线验收：WSL 下 `patch/tests` + `tools/tests` 55 项通过，`modules/menu_ui/tests/run.sh` 全绿（模型层单测 + 两份 `appFw.so` 各 120 项地址校验 + A7C II 交叉构建），A6700 后端交叉编译通过；实机刷写与加载仍未验收。
+
+## v0.2.0（2026-11-24）
+
+- 支持运行时修改 CP 代码区。
+- 优化 CP 内存读写和框架。
 
 ## v0.1.1（2026-11-22）
 

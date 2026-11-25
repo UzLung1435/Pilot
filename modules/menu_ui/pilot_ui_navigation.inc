@@ -40,6 +40,9 @@ static void pilot_log_list_state(const char *phase, void *ctrl, uint32_t source)
     ui_log(message);
 }
 
+static void pilot_clear_list_return(void);
+static void pilot_busy_on_293_enter(void *ctrl_293, uint32_t source_id);
+
 static void pilot_293_ctrl_enter_hook(void *ctrl, const uint32_t *source)
 {
     if (!pilot_current_group()) {
@@ -48,6 +51,14 @@ static void pilot_293_ctrl_enter_hook(void *ctrl, const uint32_t *source)
     }
 
     uint32_t source_id = source ? *source : SCREEN_NONE;
+    if (g_pending_list_page) {
+        pilot_apply_pending_list_page();
+    } else if (source_id == 0x292u && g_active_page != &g_pilot_root_page) {
+        /* Fresh entry from main menu (0x292): always reset to Pilot root. */
+        pilot_clear_list_return();
+        g_pending_list_page = &g_pilot_root_page;
+        pilot_apply_pending_list_page();
+    }
     int restore = g_return_list_pending && g_return_list_page == g_active_page;
     pilot_log_list_state("enter_before", ctrl, source_id);
     if (restore) {
@@ -71,6 +82,7 @@ static void pilot_293_ctrl_enter_hook(void *ctrl, const uint32_t *source)
     }
     g_pilot_detail_active = 0;
     pilot_log_list_state("enter_after", ctrl, source_id);
+    pilot_busy_on_293_enter(ctrl, source_id);
 }
 
 static int pilot_attach_list_lifecycle(void *ctrl)
@@ -133,19 +145,23 @@ static uint32_t pilot_detail_focus_mask(const void *ctrl)
     return mask;
 }
 
-static void pilot_log_detail_focus(void *ctrl)
+static void pilot_log_detail_focus(void *ctrl, int expect_toggle)
 {
     if (!ctrl)
         return;
     const uint8_t *cursor = (const uint8_t *)ctrl + APPFW_293_CURSOR_OBJ_OFF;
     uint64_t count = *(const uint64_t *)(cursor + 0x30u);
     uint32_t mask = pilot_detail_focus_mask(ctrl);
+    uint64_t want_count = expect_toggle ? 2u : 1u;
+    uint32_t want_mask = expect_toggle ? ((1u << 7u) | (1u << 8u)) : (1u << 8u);
     char message[128];
     snprintf(message, sizeof(message),
-             "PILOT_UI_FOCUS ctrl=%p count=%llu mask=0x%x update=%u ok=%u",
+             "PILOT_UI_FOCUS ctrl=%p count=%llu mask=0x%x update=%u ok=%u expect_toggle=%d",
              ctrl, (unsigned long long)count, mask,
-             (mask >> 7u) & 1u, (mask >> 8u) & 1u);
+             (mask >> 7u) & 1u, (mask >> 8u) & 1u, expect_toggle);
     ui_log(message);
-    if (count != 1u || mask != (1u << 8u))
-        ui_log("PILOT_UI_ERR detail focus tree must contain only OK");
+    if (count != want_count || mask != want_mask)
+        ui_log(expect_toggle
+                   ? "PILOT_UI_ERR detail focus tree must contain Toggle and OK"
+                   : "PILOT_UI_ERR detail focus tree must contain only OK");
 }

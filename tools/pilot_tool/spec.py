@@ -78,7 +78,8 @@ def validate_spec(spec):
             if space not in ("ap", "cp") or len(before) > 64:
                 raise ValueError("RAM site requires ap/cp and at most 64 bytes")
             if space == "cp" and address < 0x01000000:
-                raise ValueError("CP code region is read-only in Pilot SDK")
+                if address < 0x00128000 or end > 0x011D8000 or (address < 0x00C12FC0 and end > 0x00C12D68):
+                    raise ValueError("CP patch outside supported code region")
         if any(s == space and address < e and start < end for s, start, e in ranges):
             raise ValueError("overlapping patch windows")
         ranges.append((space, address, end))

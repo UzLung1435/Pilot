@@ -42,13 +42,15 @@ def parser():
     logs.add_argument("--card", required=True, type=Path)
     logs.add_argument("--out", required=True, type=Path)
     flash = commands.add_parser("flash", help="call on_camera.py with external local inputs")
-    flash.add_argument("action", choices=("check", "install", "restore", "update-pilot", "clean"))
-    flash.add_argument("--map", dest="map_path", required=True, type=Path)
-    flash.add_argument("--transport-root", required=True, type=Path)
-    flash.add_argument("--state-dir", required=True, type=Path)
+    flash.add_argument("action", choices=("check", "install", "restore", "update-pilot", "clean", "prepare-ap", "cp-check", "cp-install", "cp-restore"))
+    flash.add_argument("--map", dest="map_path", type=Path)
+    flash.add_argument("--transport-root", type=Path)
+    flash.add_argument("--state-dir", type=Path)
     flash.add_argument("--writer", type=Path)
     flash.add_argument("--pilot", type=Path)
+    flash.add_argument("--output-dir", type=Path)
     flash.add_argument("--yes", action="store_true")
+    flash.add_argument("--force", action="store_true")
     return root
 
 
@@ -82,21 +84,24 @@ def main(argv=None):
         elif args.command == "logs":
             result = export_logs(args.card, args.out)
         else:
-            writing = args.action in ("install", "restore", "update-pilot")
+            writing = args.action in ("install", "restore", "update-pilot", "cp-install", "cp-restore")
             if writing and not args.yes:
                 raise ValueError("flash writes require --yes")
-            if args.action != "check" and args.writer is None:
-                raise ValueError("this flash action requires --writer")
-            if args.action in ("install", "update-pilot") and args.pilot is None:
-                raise ValueError("this flash action requires --pilot")
             script = Path(__file__).resolve().parents[2] / "patch/on_camera.py"
-            command = [sys.executable, str(script), "--" + args.action, "--map", str(args.map_path),
-                       "--transport-root", str(args.transport_root), "--state-dir", str(args.state_dir)]
+            command = [sys.executable, str(script), "--" + args.action]
+            for option, value in (("--map", args.map_path), ("--transport-root", args.transport_root), ("--state-dir", args.state_dir)):
+                if value is not None:
+                    command.extend([option, str(value)])
             for name in ("writer", "pilot"):
                 if getattr(args, name) is not None:
                     command.extend(["--" + name, str(getattr(args, name))])
+            for option, value in (("--output-dir", args.output_dir),):
+                if value is not None:
+                    command.extend([option, str(value)])
             if args.yes:
                 command.append("--yes")
+            if args.force:
+                command.append("--force")
             return subprocess.run(command, check=False).returncode
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

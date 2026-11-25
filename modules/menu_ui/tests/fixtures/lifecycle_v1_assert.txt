@@ -1,0 +1,19 @@
+1970-01-01T00:00:07Z PILOT_UI_READY group=0x535 list=0x293 detail=0x1c3 nav=lifecycle-v1 focus=tree-log-v1
+1970-01-01T00:00:10Z PILOT_UI_TRACE 293_ctrl_factory enter buf=0x7f74929cf0 a1=0x7f6b3f05f0 a2=0x7f6b3eff80(vt=0x4a27e78,vt7=0x19cb8fc) a3=0x7f6b3eff08 a4=0
+1970-01-01T00:00:10Z PILOT_UI_TRACE 293_ctrl_factory ok
+1970-01-01T00:00:10Z PILOT_UI_NAV enter_before ctrl=0x7f74929cf0 source=0x292 row=0x1f00 item=0x1f00 cursor=370 saved=0x0 pending=0
+1970-01-01T00:00:10Z PILOT_UI_NAV enter_after ctrl=0x7f74929cf0 source=0x292 row=0x1f00 item=0x1f00 cursor=12 saved=0x0 pending=0
+1970-01-01T00:00:10Z PILOT_UI_TRACE 293_factory enter buf=0x7f74109cf0 pool=0 sid=0x293
+1970-01-01T00:00:10Z PILOT_UI_TRACE 293_factory orig_done
+1970-01-01T00:00:10Z PILOT_UI_TRACE 293_factory ok
+1970-01-01T00:00:11Z PILOT_UI_DBG btn_confirm in=1 view=0x7f74109cf0
+1970-01-01T00:00:11Z PILOT_UI_TRACE resolve_detail cur_grp=0x535 cur_item=0x1f00 in=1
+1970-01-01T00:00:11Z PILOT_UI_NAV open_detail ctrl=0x7f74929cf0 source=0x1c3 row=0x1f00 item=0x1f00 cursor=12 saved=0x1f00 pending=1
+1970-01-01T00:00:11Z PILOT_UI_DBG pilot_open item=0x1f00 sid=0x1c3
+1970-01-01T00:00:11Z PILOT_UI_DBG btn_confirm consumed
+1970-01-01T00:00:11Z PILOT_UI_TRACE resolve_detail cur_grp=0x535 cur_item=0x1f00 in=1
+1970-01-01T00:00:11Z PILOT_UI_TRACE 1c3_ctrl_factory open_detail
+1970-01-01T00:00:11Z PILOT_UI_FOCUS ctrl=0x7f74929cf0 count=1 mask=0x100 update=0 ok=1
+1970-01-01T00:00:11Z PILOT_UI_TRACE resolve_detail cur_grp=0x535 cur_item=0x1f00 in=1
+1970-01-01T00:00:11Z PILOT_UI_TRACE 1c3_view_factory open_detail
+1970-01-01T00:00:11Z ASSERT_CAPTURE entry=public pid=517 tid=720 base=0x7F6BD75000 lr=0x7F6E671F0C lr_rva=0x28FCF0C sp=0x7F6B3EF030 fp=0x7F6B3EF030 nzcv=0x0 x0=0x0 x1=0x2 x2=0x0 x3=0x2 stk0=0x7F6B3EF090 stk1=0x7F6E3D726C stk2=0x7F74109CF0 stk3=0x0 stk4=0x1 stk5=0x0 stk6=0x7F6B3EF128 stk7=0x7F6B3F0880

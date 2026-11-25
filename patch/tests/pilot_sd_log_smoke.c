@@ -476,7 +476,11 @@ int main(int argc, char **argv)
                            strcmp(scenario, "status-only") == 0 ||
                            strcmp(scenario, "dtinit") == 0 ||
                            strcmp(scenario, "probe") == 0;
-        if (!!(api->feature_flags & PILOT_FEATURE_TIME_UTC) == want_enabled)
+        int fuse_ready = strcmp(scenario, "fuse-armed") != 0 ||
+                         file_contains(log_path, "Pilot module fuse tripped");
+        if (fuse_ready &&
+            !!(api->feature_flags & PILOT_FEATURE_TIME_UTC) == want_enabled &&
+            (want_enabled || api->time_utc((char[32]){0}, 32) == PILOT_STATUS_DISABLED))
             break;
         usleep(10000);
     }

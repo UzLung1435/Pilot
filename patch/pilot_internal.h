@@ -123,6 +123,17 @@ PilotStatus pilot_cp_mem_patch_impl(uint64_t cp_address,
                                     const void *expected,
                                     const void *replacement,
                                     size_t length);
+PilotStatus pilot_cp_mem_write_async_impl(uint64_t cp_address,
+                                          const void *input,
+                                          size_t length,
+                                          PilotCpMemCallback callback,
+                                          void *user_data);
+PilotStatus pilot_cp_mem_patch_async_impl(uint64_t cp_address,
+                                          const void *expected,
+                                          const void *replacement,
+                                          size_t length,
+                                          PilotCpMemCallback callback,
+                                          void *user_data);
 PilotStatus pilot_get_module_dir_impl(const char *module_name,
                                      char *buffer,
                                      size_t capacity);

@@ -1,12 +1,10 @@
 # 使用方式
 
-框架发布下载：[Releases](https://github.com/Himpq/Pilot/releases)。适用 Sony ILCE-6700 固件 2.00，以及 Sony ILCE-7CM2（A7C II）固件 2.01（离线适配完成，实机未验收）；模块 ABI 为 2。电脑端工具需要 Python 3.10 或更新版本。
-
-**机型不可混用**：A6700 用 `pilot.so` + `pilot_module_model_a6700`，A7C II 用 `pilot_a7c2.so` + `pilot_module_model_a7c2`。两者的引导导出符号、常驻路径和岛内字符串表都按机型分开，刷写与部署时会先校验，避免装错。机型清单见 [`models.json`](../models.json)。
+框架发布下载：[Releases](https://github.com/Himpq/Pilot/releases)。适用 Sony ILCE-6700 固件 2.00 与 Sony ILCE-7CM2 固件 2.01，模块 ABI 为 2；两机的框架与模块互不通用（见下文）。电脑端工具需要 Python 3.10 或更新版本。
 
 ## 1. 准备文件
 
-从 Releases 下载**与相机机型匹配**的常驻框架：A6700 为 `pilot.so`，A7C II 为 `pilot_a7c2.so`。
+从 Releases 下载所需版本的 `pilot.so`。
 下载源码包或克隆仓库，在仓库根目录运行后续命令：
 
 ```sh
@@ -15,37 +13,60 @@ cd Pilot
 python tools/pilot.py --help
 ```
 
+### 为相机生成 AP 安装配置
+
+安装 `requirements-camera.txt` 的依赖。将相机连接到电脑后，先读取当前 AP 并生成配套文件：
+
+```powershell
+python tools/pilot.py flash prepare-ap --map patch.a6700.json --pilot ./pilot.so --output-dir ./ap-plan
+```
+
+A7C II 把 `--map` 换成本机描述文件（`patch.a7c2.json`），其余步骤相同。机型身份以 `models.json` 为唯一来源，构建时用 `PILOT_MODEL` 选择；不能把一台机器的 `pilot.so` 或模块用到另一台上——文件名、ON_MOUNT 符号和模块机型标记都不相同。
+
+预检不写入相机。它会输出各补丁位置的当前值与配置差异，并在 `ap-plan/` 保存完整的 `preflight-report.json`、安装前备份、匹配当前相机的 `patch.json`、补丁数据和通用刷写器。检查报告，决定是否覆盖不同的位置后再执行：
+
+```powershell
+python tools/pilot.py flash install --map ./ap-plan/patch.json --writer ./ap-plan/pilot_ap_flash.so --pilot ./ap-plan/pilot.so --yes
+```
+
+已安装过框架、只想更新常驻库时运行：
+
+```powershell
+python tools/pilot.py flash update-pilot --map ./ap-plan/patch.json --writer ./ap-plan/pilot_ap_flash.so --pilot ./ap-plan/pilot.so --yes
+```
+
+生成的配置记录本次读取的安装前字节；恢复时使用相同的配置和刷写器。安装前如 AP 文件发生变化，需要重新预检。
+
 首次安装或更新常驻框架还需要以下本机材料：
 
 | 材料 | 内容 |
 |---|---|
-| `patch.json` | 匹配当前相机 AP 基线的完整 `pilot.patch-map.v1` 配置，含完整的 `runtime` 机型块 |
-| `pilot_ap_flash.so` | 与配置、目标常驻 DSO 配套的刷写器，内部嵌入待安装的框架 |
-| USB transport 目录 | `cpload_run.py` 及其所需的本机 USB 环境 |
+| `patch.json` | 预检时根据当前相机生成的完整配置，含完整的 `runtime` 机型块 |
+| `pilot_ap_flash.so` | 预编译的通用刷写器，读取本次补丁数据和目标常驻 DSO |
+| USB 环境 | 安装 `requirements-camera.txt` 中的依赖 |
 | 本机状态目录 | 存放原文件备份和设备操作记录 |
 
-上述材料保留在本机，通过命令参数指定。`patch.a6700.json` 与 `patch.a7c2.json` 是结构说明；安装使用包含目标哈希、框架及刷写器哈希的完整配置。
-更新框架版本时，配置和刷写器也要与新的常驻 DSO 一起匹配。
+上述材料保留在本机，通过命令参数指定。`patch.a6700.json`/`patch.a7c2.json` 描述机型补丁；预检生成的配置记录当前相机、所选 `pilot.so` 和刷写器的校验值。
 
-A7C II 2.01 还需准备：`patch.a7c2.image.json`（`pilot.patch.v1` 离线镜像描述）、按 A7C II 四个窗口重建的 `pilot_ap_flash.so`、以及 `PILOT_MODEL=a7c2` 构建的 `pilot_a7c2.so`。完整依据与 `patch.json` 模板见 [A7C II 适配说明](A7C2-PORT.md)：**复制 `runtime` 块时不得删字段**，它决定设备路径、结果头与 DSO 符号校验；默认结果头为 `A7C2PILOTFLASH\n`，刷写器若沿用旧头可在 `patch.json` 中设置 `flash.header` 覆盖。
+A7C II 的 `patch.a7c2.json` 还记录 `target.accepted_sources`：同一套补丁窗口在原厂与其他已验证来源（如 FL23）上字节一致，安装工具按窗口比对，不要求整文件等于某个固定哈希。
 
 ## 2. 检查与升级常驻框架
 
-相机连接电脑并设置为大容量存储 USB 模式。下面以 A6700 为例（Windows PowerShell）；A7C II 把 `--pilot` 换成 `F:/PilotLocal/pilot_a7c2.so`，`--map` 换成带 `a7c2` `runtime` 块的 `patch.json`，其余参数相同：
+相机连接电脑并设置为大容量存储 USB 模式。下面是 Windows PowerShell 示例，将路径替换为自己的本机材料位置：
 
 ```powershell
 $pilotArgs = @(
   "--map", "F:/PilotLocal/patch.json",
   "--writer", "F:/PilotLocal/pilot_ap_flash.so",
   "--pilot", "F:/PilotLocal/pilot.so",
-  "--transport-root", "F:/PilotLocal/transport",
+  "--transport-root", "./patch",
   "--state-dir", "F:/PilotLocal/device-state"
 )
 
 # 读取相机 AP 和常驻 Pilot 的哈希
 python tools/pilot.py flash check @pilotArgs
 
-# 已安装 Pilot：更新机型的常驻 DSO（A7C II 为 /usr/lib/pilot_a7c2.so）
+# 已安装 Pilot：更新 /usr/lib/pilot.so
 python tools/pilot.py flash update-pilot @pilotArgs --yes
 ```
 
@@ -62,34 +83,8 @@ python tools/pilot.py flash install @pilotArgs --yes
 ## 3. 安装扩展模块
 
 将模块文件放入 SD 卡 `/pilot/`，并将文件名加入现有 `/pilot/modules.txt` 的 `modules` 数组，保留其他条目及加载顺序。
-模块的兼容性、下载和具体使用方式以各自的发布说明为准；**只安装与相机机型相同的模块**。
-
-清单内容仍是 JSON（`{"modules": ["pilot_example.so"]}`），但文件名必须是 `modules.txt`：相机固件的 Fsys 会校验打开文件的扩展名，`.json` 会被拒绝为 `0x80000041`（参数非法），而 `.txt`、`.so` 可以正常打开。旧卡上的 `modules.json` 只在上一代工具里有效，相机端不会读取；`python tools/pilot.py modules deploy` 会自动读出旧清单并同时写入 `modules.txt`。
-
-用工具部署时显式传入机型，会校验模块的 `pilot_module_model_<id>` 标记，避免把 A6700 模块装到 A7C II（或反之）：
-
-```powershell
-python tools/pilot.py modules deploy private/a7c2_example.so --card D:/ --model a7c2 `
-  --sha256 <模块SHA256> --backup-dir F:/PilotLocal/backups
-```
-
-相机端还有第二道检查：框架在 `dlopen` 之后、调用 `pilot_module_init` 之前用 `dlsym` 核对机型标记，不匹配时会在 `/pilot/log.txt` 记录 `model mismatch` 并隔离整个模块包。
-
-### 清单文件名：为什么是 `modules.txt`
-
-相机固件的 Fsys 在打开文件时校验扩展名。ILCE-7CM II（`a7c2`，固件 2.01）实测，所有文件都在 SD 卡 `/pilot/`、同一张卡、由宿主写入：
-
-| 卡上文件 | `Fsys_Open` 结果 |
-| --- | --- |
-| `modules.json` | `0x80000041`（参数非法），读不到内容 |
-| `MODULES.JSON`（8.3 大写、1980 时间戳） | 仍是 `0x80000041`，与大小写、长文件名、时间戳、大小无关 |
-| `modules.txt` | `0`，正常读出 |
-| `probe.txt`（任意内容） | `0`，正常读出 |
-| `MNUI.SO`（模块本体） | `0`，正常读出 |
-
-`0x80000041` 不是"文件不存在"（那是 `0x80000051`）。旧版加载器把非 not-found 的读错误当作"可选功能不可用"，静默禁用整套模块且不写日志，表现为菜单里看不到模块、日志里也查不到原因。
-
-因此：清单固定为 `/pilot/modules.txt`（`patch/pilot.h` 的 `PILOT_MANIFEST_NAME`），内容仍是 JSON；模块自带的可选配置同理，固定为 `/pilot/modules/<模块名>/config.txt`（`PILOT_MODULE_CONFIG_NAME`）。
+相机 Fsys 会拒绝打开 `.json`（`0x80000041`），所以清单文件名是 `modules.txt`、内容仍是 JSON。
+模块的兼容性、下载和具体使用方式以各自的发布说明为准。
 
 ## 4. 日志与停用
 
