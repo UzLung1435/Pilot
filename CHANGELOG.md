@@ -20,6 +20,7 @@
 - `flash install/update-pilot` 把补丁计划（`pilotflash-plan.bin`）、常驻 DSO（`pilotflash-pilot.so`）与 writer 分开上传并在结束后校验清理；`pilot_dso`/`flash_writer` 的哈希元数据变为可选。三者各自仍受 64 KiB 单文件限制。
 - MenuUI 双后端共存于一份构建脚本：`PILOT_MODEL=a6700` 编 A6700 后端（含 Live View 纯文本与选项弹窗），`PILOT_MODEL=a7c2` 编 `a7c2/pilot_menu_ui_a7c2.c`（不含 LV）；两者共用 `PILOT_MANIFEST_NAME`（`modules.txt`）与 `PILOT_MODULE_CONFIG_NAME`（`config.txt`）。
 - 离线验收：WSL 下 `patch/tests` + `tools/tests` 55 项通过，`modules/menu_ui/tests/run.sh` 全绿（模型层单测 + 两份 `appFw.so` 各 120 项地址校验 + A7C II 交叉构建），A6700 后端交叉编译通过；实机刷写与加载仍未验收。
+- 常驻 DSO 瘦身到上传上限内：`patch/build_pilot_dso.sh` 改为按函数/数据分段编译并`--gc-sections --strip-all`，有 lld 时用 `-fuse-ld=lld` 让段紧排，无 lld 时退到 `-z norelro`；`build/pilot_a7c2.so` 从 75,528 B 降到 39,808 B（`8612eec6…`，仅 `GLIBC_2.17`，`GNU_RELRO` 保留），A6700 的 `pilot.so` 同样降到 39,808 B。链接后脚本断言 ≤65536 B。已用相机 glibc 2.25 在 `qemu-aarch64` 下 `dlopen(RTLD_NOW)` 冒烟通过。
 
 ## v0.2.0（2026-11-24）
 

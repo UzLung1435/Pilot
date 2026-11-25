@@ -31,15 +31,43 @@ for pilot_input in \
     "$pilot_cc" --sysroot="$pilot_sysroot" \
         -std=c11 -O2 -march=armv8-a -mno-outline-atomics \
         -fno-stack-protector -fPIC -fvisibility=hidden \
+        -ffunction-sections -fdata-sections \
         -Wall -Wextra -Werror -D"$pilot_build_macro" \
         -I "$pilot_root/patch" -c "$pilot_input" -o "$pilot_object"
 done
 
+# The DSO is uploaded through the Jiritsu file command, which caps a single
+# file at 64 KiB.  The link step therefore has to stay inside that budget:
+# drop unused sections and the symbol table, and pick a linker that packs the
+# loadable segments instead of padding them out to the 64 KiB page size
+# (binutils pads to max-page-size, which alone costs ~24 KiB of holes here).
+pilot_link_flags=(
+    -Wl,--build-id=none -Wl,--hash-style=gnu
+    -Wl,--gc-sections -Wl,--strip-all
+)
+if "$pilot_cc" -fuse-ld=lld -shared -Wl,-soname,pilot_ld_probe.so \
+        -o /dev/null -x c /dev/null 2>/dev/null; then
+    pilot_link_flags+=(-fuse-ld=lld)
+else
+    # Without lld the RELRO segment lands past the 64 KiB boundary; keeping the
+    # GOT writable is the smaller price than failing the upload limit.
+    pilot_link_flags+=(-Wl,-z,norelro)
+fi
+
 mkdir -p "$(dirname "$pilot_output")"
 "$pilot_cc" --sysroot="$pilot_sysroot" -shared -nostdlib \
     -Wl,-soname,"$pilot_soname" -Wl,--no-undefined -Wl,--no-as-needed \
+    "${pilot_link_flags[@]}" \
     -L"$pilot_sysroot/lib" -o "$pilot_output" "$pilot_build"/*.o \
     -lgcc -l:libdl.so.2 -l:libpthread.so.0 -l:libc.so.6
+
+pilot_limit=65536
+pilot_size=$(stat -c %s "$pilot_output")
+if [ "$pilot_size" -gt "$pilot_limit" ]; then
+    echo "Pilot DSO is $pilot_size bytes; the Jiritsu upload limit is $pilot_limit" >&2
+    exit 1
+fi
+echo "Pilot DSO size=$pilot_size limit=$pilot_limit"
 
 pilot_symbols="$(readelf -sW "$pilot_output")"
 for pilot_symbol in "$(pilot_value mount_callback_symbol)" \
