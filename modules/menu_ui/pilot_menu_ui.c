@@ -11,11 +11,12 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Declare module model compatibility */
 PILOT_DECLARE_MODULE_MODEL();
 
 #define PILOT_MENU_TITLE_DEFAULT "Pilot"
 #define PILOT_UI_DESC_STRING \
-    "An a6700 Firmware AP module trying to provide\n" \
+    "An a7c2 Firmware AP module trying to provide\n" \
     "an auto reload RAM Patch framework without\n" \
     "Jiritsu USB connection."
 
@@ -40,7 +41,10 @@ PILOT_DECLARE_MODULE_MODEL();
 #define PILOT_LIST_ITEMS_MAX 16u
 #define PILOT_PAGE_STACK_MAX 8u
 
-/* ILCE-6700 2.00 appFw.so offsets */
+/* ILCE-7CM2 (A7C II) 2.01 appFw.so offsets
+ * Note: These offsets need to be verified and updated for a7c2.
+ * Currently using a6700 offsets as placeholder - requires reverse engineering
+ * of a7c2 appFw.so to determine correct values. */
 #define APPFW_GOT_MENU_TABLE 0x4EA8A68ull
 #define APPFW_MENU_TABLE_OFF 0x44B8AB0ull
 #define APPFW_MENU_TABLE_SIZE 0xF908ull
@@ -547,24 +551,22 @@ static int write_pilot_file_fsys(const char *path, const char *data, size_t len)
     return ok;
 }
 
-static int write_manifest_fsys(void)
+static int write_modules_json_fsys(void)
 {
     char json[2048];
     if (!format_modules_json(json, sizeof(json)))
         return 0;
     char path[64];
     ensure_pilot_drive_letter();
-    snprintf(path, sizeof(path), "%c:/pilot/%s", g_pilot_drive_letter,
-             PILOT_MANIFEST_NAME);
+    snprintf(path, sizeof(path), "%c:/pilot/modules.json", g_pilot_drive_letter);
     return write_pilot_file_fsys(path, json, strlen(json));
 }
 
-static int read_manifest_fsys(char *buf, size_t cap)
+static int read_modules_json_fsys(char *buf, size_t cap)
 {
     char path[64];
     ensure_pilot_drive_letter();
-    snprintf(path, sizeof(path), "%c:/pilot/%s", g_pilot_drive_letter,
-             PILOT_MANIFEST_NAME);
+    snprintf(path, sizeof(path), "%c:/pilot/modules.json", g_pilot_drive_letter);
     return read_pilot_file_fsys(path, buf, cap);
 }
 
@@ -616,8 +618,8 @@ static void read_module_meta_fsys(const char *module_name,
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
         if (!names[i] || !names[i][0])
             continue;
-        snprintf(path, sizeof(path), "%c:/pilot/modules/%.63s/%s",
-                 g_pilot_drive_letter, names[i], PILOT_MODULE_CONFIG_NAME);
+        snprintf(path, sizeof(path), "%c:/pilot/modules/%.63s/config.json",
+                 g_pilot_drive_letter, names[i]);
         if (!read_pilot_file_fsys(path, json, sizeof(json)))
             continue;
         if (title_out && title_cap > 1)
@@ -633,7 +635,7 @@ static void read_module_meta_fsys(const char *module_name,
 static void load_menu_title_from_config(void)
 {
     /* Root/entry title is fixed to "Pilot"; module item titles come from each
-     * module's PILOT_MODULE_CONFIG_NAME in build_root_page(). */
+     * module's config.json in build_root_page(). */
     snprintf(g_menu_title, sizeof(g_menu_title), "%s", PILOT_MENU_TITLE_DEFAULT);
     g_pilot_root_page.title = g_menu_title;
 }
@@ -813,7 +815,7 @@ static const PilotUiPage *build_root_page(void *user)
     (void)user;
     if (!g_mods_loaded) {
         char json[2048];
-        if (read_manifest_fsys(json, sizeof(json)))
+        if (read_modules_json_fsys(json, sizeof(json)))
             parse_modules_json(json);
         else
             g_mod_count = 0;
@@ -2126,10 +2128,10 @@ static uint32_t pilot_1c3_confirm_hook(void *ctrl, void *ev)
                 (size_t)g_detail_module_index < g_mod_count) {
                 size_t idx = (size_t)g_detail_module_index;
                 g_mod_enabled[idx] = !g_mod_enabled[idx];
-                int saved = write_manifest_fsys();
+                int saved = write_modules_json_fsys();
                 if (!saved) {
                     g_mod_enabled[idx] = !g_mod_enabled[idx];
-                    ui_log("PILOT_UI_ERR manifest write failed; toggle reverted");
+                    ui_log("PILOT_UI_ERR modules.json write failed; toggle reverted");
                     return 1u;
                 }
                 refresh_module_ui_strings(idx);

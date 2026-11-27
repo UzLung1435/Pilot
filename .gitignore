@@ -6,3 +6,4 @@ __pycache__/
 /patch.json
 /local/
 /private/
+/modules/menu_ui/ida_tools/*

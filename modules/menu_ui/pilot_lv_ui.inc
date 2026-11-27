@@ -76,16 +76,15 @@ static void lv_load_config(void)
     const char *src = "default";
 
     if (g_api && g_api->file && g_api->file->read &&
-        g_api->file->read(g_api->file, PILOT_MODULE_CONFIG_NAME, json,
-                          sizeof(json)) ==
+        g_api->file->read(g_api->file, "config.json", json, sizeof(json)) ==
             PILOT_STATUS_OK &&
         json[0]) {
         src = "moduleDir";
     } else {
         char path[128];
         ensure_pilot_drive_letter();
-        snprintf(path, sizeof(path), "%c:/pilot/modules/menu_ui/%s",
-                 g_pilot_drive_letter, PILOT_MODULE_CONFIG_NAME);
+        snprintf(path, sizeof(path), "%c:/pilot/modules/menu_ui/config.json",
+                 g_pilot_drive_letter);
         if (read_pilot_file_fsys(path, json, sizeof(json)) && json[0])
             src = "menu_ui_fallback";
     }
@@ -230,7 +229,7 @@ static void *pilot_lv_monitor_thread(void *arg)
     int all_ready = 0;
     int has_6k = 0;
 
-    /* Poll up to 12 seconds (120 * 100ms) for remaining modules in modules.txt */
+    /* Poll up to 12 seconds (120 * 100ms) for remaining modules in modules.json */
     for (int tick = 0; tick < 120; ++tick) {
         struct lv_mod_scan_ctx ctx;
         ctx.loaded_mask = 0u;
@@ -294,10 +293,10 @@ static void install_pilot_lv_ui(void)
 {
     lv_load_config();
 
-    /* Snapshot enabled modules from modules.txt synchronously while on init thread */
+    /* Snapshot enabled modules from modules.json synchronously while on init thread */
     g_lv_expected_count = 0u;
     char json[2048];
-    if (read_manifest_fsys(json, sizeof(json))) {
+    if (read_modules_json_fsys(json, sizeof(json))) {
         parse_modules_json(json);
         for (size_t i = 0; i < g_mod_count && g_lv_expected_count < PILOT_LIST_ITEMS_MAX; ++i) {
             if (g_mod_enabled[i] && g_mod_names[i][0]) {

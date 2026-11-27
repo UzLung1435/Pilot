@@ -63,7 +63,7 @@ struct PilotUiPage {
  * Text is UTF-8 and limited to 159 bytes.
  * The service has one shared message; each show call replaces its contents.
  * The provider is resolved at call time, so modules do not need a link-time
- * dependency on pilot_menu_ui.so. Add pilot_menu_ui.so to modules.txt and
+ * dependency on pilot_menu_ui.so. Add pilot_menu_ui.so to modules.json and
  * load it before callers. Missing provider returns PILOT_STATUS_NOT_FOUND;
  * an unavailable Live View hook returns PILOT_STATUS_DISABLED.
  * Example: pilot_ui_show_text("Sensor mode ready", 3000u);

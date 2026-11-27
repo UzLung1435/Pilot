@@ -1,6 +1,0 @@
-{
-  "modules": [
-    "pilot_menu_ui.so",
-    "pilot_video_modes.so"
-  ]
-}

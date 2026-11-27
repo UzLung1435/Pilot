@@ -1,0 +1,40 @@
+{
+  "title": "Pilot Menu UI",
+  "description": "Pilot 主菜单界面模块，提供模块管理、版本信息和设置界面",
+  "version": "1.0.0-a7c2",
+  "target_model": "a7c2",
+  "target_camera": "Sony ILCE-7CM2 (A7C II)",
+  "target_firmware": "2.01",
+  "ported_from": "Himpq-Pilot a6700",
+  "status": "experimental",
+  "warnings": [
+    "This is a port from a6700 to a7c2",
+    "appFw.so offsets are currently placeholders from a6700",
+    "Requires reverse engineering of a7c2 appFw.so before use",
+    "DO NOT install on actual camera until offsets are verified"
+  ],
+  "features": [
+    "Pilot version display",
+    "Module list with status",
+    "Module enable/disable toggle",
+    "Per-module options (bool/enum/action)",
+    "Live view text overlay API",
+    "Busy dialog API",
+    "RID override API"
+  ],
+  "dependencies": [
+    "libpthread.so.0",
+    "libdl.so.2",
+    "libc.so.6"
+  ],
+  "exports": [
+    "pilot_module_init",
+    "pilot_module_model_a7c2",
+    "pilot_ui_text_show_v1",
+    "pilot_ui_text_clear_v1",
+    "pilot_ui_register_options_v1",
+    "pilot_ui_show_busy_v1",
+    "pilot_ui_hide_busy_v1",
+    "pilot_ui_set_rid_override_v1"
+  ]
+}
