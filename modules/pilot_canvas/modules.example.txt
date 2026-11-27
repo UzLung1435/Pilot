@@ -1,0 +1,6 @@
+{
+  "modules": [
+    "pilot_menu_ui.so",
+    "pilot_canvas.so"
+  ]
+}
