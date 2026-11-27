@@ -53,7 +53,7 @@ A7C II 的固件依据、注入岛重定位、四个补丁窗口与未验项见 
 
 构建时通过 `PILOT_MODEL=a6700|a7c2` 选择机型（默认 `a6700`）；模块必须调用 `PILOT_DECLARE_MODULE_MODEL()` 导出对应标记。刷写前、部署时、运行时各有一次机型校验，装错机型的 DSO 或模块会在加载前被拒绝。A6700 已验证的产物保持原样，A7C II 使用全套 `a7c2` 命名。
 
-6K 仍是 ILCE-6700 2.00 专用模块，非 `a6700` 的构建会被脚本拒绝；MenuUI 已有 A7C II 后端，用 `PILOT_MODEL=a7c2` 构建，两机的实现与菜单入口不同，见 [A7C II 菜单说明](modules/menu_ui/a7c2/README.md)。
+6K 仍是 ILCE-6700 2.00 专用模块，非 `a6700` 的构建会被脚本拒绝；MenuUI 已有 A7C II 后端，用 `PILOT_MODEL=a7c2` 构建，两机的实现与菜单入口不同，见 [A7C II 菜单说明](modules/menu_ui/a7c2/README.md)。Pilot Canvas 同样是 ILCE-6700 2.00 专用（原生 GOT 槽位、DISP 模式 BSS 与 CP RAM 地址只在 A6700 上定位过），构建脚本拒绝其它机型，见 [画布模块说明](modules/pilot_canvas/README.md)。
 
 ## 特性
 
@@ -139,3 +139,7 @@ PILOT_MODEL=a7c2 PILOT_SYSROOT=/path/to/a7c2-2.01/sysroot \
 ## 6K
 
 [6K 模块使用说明](modules/6k/README.md)：将 4K HS 24p 替换为 5760×3240／23.976p 录制。[下载 6K v0.1.0](https://github.com/Himpq/Pilot/releases/tag/6k-v0.1.0)。
+
+## Pilot Canvas
+
+[画布与实时波形模块使用说明](modules/pilot_canvas/README.md)：在 Live View 上叠加 RGB Parade、亮度/RGB 波形与直方图，按 `DISP` 切入 Pilot 虚拟显示页，并向其他模块导出批量矩形/折线/OSD 文本与多槽位文本接口。仅适用于 ILCE-6700 2.00，构建脚本在其他机型上直接拒绝。

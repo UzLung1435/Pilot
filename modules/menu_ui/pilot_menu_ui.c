@@ -2125,7 +2125,8 @@ static uint32_t pilot_1c3_confirm_hook(void *ctrl, void *ev)
                            APPFW_CURSOR_GET_INDEX_OFF))(cursor);
         if (index == 7u) {
             if (g_detail_module_index >= 0 &&
-                (size_t)g_detail_module_index < g_mod_count) {
+                (size_t)g_detail_module_index < g_mod_count &&
+                (size_t)g_detail_module_index < PILOT_LIST_ITEMS_MAX) {
                 size_t idx = (size_t)g_detail_module_index;
                 g_mod_enabled[idx] = !g_mod_enabled[idx];
                 int saved = write_modules_json_fsys();

@@ -1,21 +1,26 @@
 {
   "title": "Pilot Menu UI",
   "description": "Pilot 主菜单界面模块，提供模块管理、版本信息和设置界面",
-  "version": "1.0.0-a7c2",
-  "target_model": "a7c2",
-  "target_camera": "Sony ILCE-7CM2 (A7C II)",
-  "target_firmware": "2.01",
-  "ported_from": "Himpq-Pilot a6700",
+  "version": "1.1.0",
+  "target_model": "a6700, a7c2",
+  "targets": [
+    "Sony ILCE-6700 2.00 (a6700, verified on hardware)",
+    "Sony ILCE-7CM2 / A7C II 2.01 (a7c2, offline port)"
+  ],
   "status": "experimental",
-  "warnings": [
-    "This is a port from a6700 to a7c2",
-    "appFw.so offsets are currently placeholders from a6700",
-    "Requires reverse engineering of a7c2 appFw.so before use",
-    "DO NOT install on actual camera until offsets are verified"
+  "notes": [
+    "The a6700 backend (pilot_menu_ui.c) is the original, hardware verified code.",
+    "The a7c2 backend (pilot_menu_ui_a7c2.c) is a separate implementation that injects the menu group and hooks view_string::draw.",
+    "Both backends are selected by build.sh from PILOT_MODEL and each carries its own model marker."
+  ],
+  "a7c2_limitations": [
+    "Detail page body text is not customised yet (no layout array on A7C II).",
+    "Confirm/back/left/right buttons are not intercepted yet.",
+    "Live view text slots are not wired yet."
   ],
   "features": [
-    "Pilot version display",
-    "Module list with status",
+    "Pilot entry in the camera custom settings menu",
+    "Module list read from /pilot/modules.txt",
     "Module enable/disable toggle",
     "Per-module options (bool/enum/action)",
     "Live view text overlay API",
@@ -29,12 +34,9 @@
   ],
   "exports": [
     "pilot_module_init",
+    "pilot_module_model_a6700",
     "pilot_module_model_a7c2",
-    "pilot_ui_text_show_v1",
-    "pilot_ui_text_clear_v1",
     "pilot_ui_register_options_v1",
-    "pilot_ui_show_busy_v1",
-    "pilot_ui_hide_busy_v1",
     "pilot_ui_set_rid_override_v1"
   ]
 }

@@ -21,7 +21,8 @@
 - MenuUI 双后端共存于一份构建脚本：`PILOT_MODEL=a6700` 编 A6700 后端（含 Live View 纯文本与选项弹窗），`PILOT_MODEL=a7c2` 编 `a7c2/pilot_menu_ui_a7c2.c`（不含 LV）；两者共用 `PILOT_MANIFEST_NAME`（`modules.txt`）与 `PILOT_MODULE_CONFIG_NAME`（`config.txt`）。
 - 离线验收：WSL 下 `patch/tests` + `tools/tests` 55 项通过，`modules/menu_ui/tests/run.sh` 全绿（模型层单测 + 两份 `appFw.so` 各 120 项地址校验 + A7C II 交叉构建），A6700 后端交叉编译通过；实机刷写与加载仍未验收。
 - 常驻 DSO 瘦身到上传上限内：`patch/build_pilot_dso.sh` 改为按函数/数据分段编译并`--gc-sections --strip-all`，有 lld 时用 `-fuse-ld=lld` 让段紧排，无 lld 时退到 `-z norelro`；`build/pilot_a7c2.so` 从 75,528 B 降到 39,808 B（`8612eec6…`，仅 `GLIBC_2.17`，`GNU_RELRO` 保留），A6700 的 `pilot.so` 同样降到 39,808 B。链接后脚本断言 ≤65536 B。已用相机 glibc 2.25 在 `qemu-aarch64` 下 `dlopen(RTLD_NOW)` 冒烟通过。
-
+- 新增 `modules/pilot_canvas`（由 Himpq-Pilot 移植）：Live View 原生画布、CP RAM OPD 实时波形/示波器、触摸拖拽与 `DISP` 虚拟显示页，并向其他模块导出绘图与多槽位文本接口。适配本仓库约定：补 `PILOT_DECLARE_MODULE_MODEL()` 机型标记；语言查询改为模块内自行 `dlsym("pilot_ui_get_language_v1")` 并回退英文，不再依赖 MenuUI 头里的声明；示例清单改为 `modules.txt` 的字符串数组；`build.sh` 按 `PILOT_MODEL`/`PILOT_SYSROOT` 选择 sysroot，非 `a6700` 目标直接拒绝，链接后校验 AArch64、无 `TEXTREL`、`pilot_module_init`/`pilot_module_model_a6700`/`pilot_canvas_probe_v1` 导出，并拒绝引用 `__isoc23_*` 或高于相机 glibc 2.25 的版本需求。相机 sysroot 的头文件与 2.25 桩库分别用 `-I`/`-L` 显式指定（`--sysroot` 会被交叉 gcc 内置的 `aarch64-linux-gnu/{include,lib}` 压过，编出桌面 glibc 2.38 的产物），产物只依赖 `GLIBC_2.17`。
+- MenuUI 的 A7C II 后端按「功能等价」路线推进：菜单行文本内联模块启用状态（`/pilot/disable` 全局标记与 `/pilot/modules/<名>/disable` 单模块标记都会让该行显示 `[off]`）；行描述符的打开目标从 `0x1C3`（实为 `dlg_rec231` 对话框）改为 `0x2CB`（`scr7001_1004`，96 个 non-setting 菜单项里有 44 个指向它的「组内项列表」屏）。同时修掉 `rid_text_set()` 只保存指针、调用方传栈缓冲会悬垂的问题，文本改由每槽 64 字节的内部缓冲持有。A7C II 产物 71,304 B（`0604f951…`），仅 `GLIBC_2.17`。
 ## v0.2.0（2026-11-24）
 
 - 支持运行时修改 CP 代码区。
@@ -37,3 +38,12 @@
 - 增加通用补丁 CLI：描述校验、离线镜像修改、RAM 模块构建、SD 模块部署和日志导出。
 - 刷写入口支持外部本机配置，写入前备份，设备状态与补丁描述分开保存。
 - 实机更新 pilot.so 并重启后，启动分隔与 7 个模块的具名加载记录正常。
+
+- **MenuUI 增加独立的 A7C II 后端**：新增 `modules/menu_ui/pilot_menu_ui_a7c2.c`（`PILOT_MODEL=a7c2` 时由 `build.sh` 选择，A6700 路径不变）。A7C II 与 A6700 的菜单 UI 同源，但没有集中 layout 数组，文本只经过单一入口 `view_string::draw`（`appFw.so+0x1827F8C`，134 个 view 调用者；全库对 `TextSprite::setString` 的两处重载与 `prefetchTextImage` 的引用都只在该函数内）。后端因此改为「复制菜单组表并插入 Pilot 组 + inline hook 文本入口」：hook 前 16 字节序言先与基线逐字节比对，不符则放弃安装；trampoline 用 `mmap` 分配，入口被改写为 `ldr x16,#8; br x16`。视图对象字段为 `+0x204` 可见、`+0x208` 文本 RID、`+0x210` 字符串指针、`+0x318` Dictionary、`+0x320` 段数。
+- `modules/menu_ui/offsets_a7c2.h` 重写为实测偏移：屏幕表 `GOT 0x05B4CFD0 → 0x051F7810`（项 `0x60`）、菜单组表 `GOT 0x05B80EC0 → 0x051DF8C8`（`0x15480` 字节，8 个 category × `0x2B30`，组 `0x2E0`）、描述符 `0x60`（`+0x00` 标签 RID、`+0x0C` 屏号、`+0x20` 可用性回调）、`0x1C3`/`0x293` 的 presenter/controller 工厂与 `TextSprite` 四个 GOT。未定位项（按键 GOT、当前组、选中行）保持 `0x00000000ull`，依赖它们的代码在 A7C II 构建中被编译掉，除非显式定义 `PILOT_A7C2_ENABLE_UNVERIFIED`。
+- A7C II 后端的模块清单复用 A6700 的方式：`dlsym` 原生 `Fsys_Open/Fsys_Read/Fsys_Close` 读 `<盘符>:/pilot/modules.txt`（回退 `modules.json`），解析 `modules` 字符串数组，每个模块一行；读不到时回退四行固定内容。清单解析器有独立单测 `work/test_manifest_parse.sh`。
+- `modules/menu_ui/build.sh` 改为双机型：`PILOT_MODEL=a7c2|a6700` 选择源文件、`-DPILOT_MODEL_A7C2` 与默认 sysroot；sysroot 探测顺序 `PILOT_SYSROOT` → 机型变量 → `../work/pilot-a7c2/sysroot`；显式 `-I $SYSROOT/usr/include -L $SYSROOT/lib`（交叉 gcc 自带的头文件是宿主 glibc，`--sysroot` 会被内置路径压过）；构建末尾校验 AArch64、无 `TEXTREL`、`pilot_module_init` 与 `pilot_module_model_<model>` 符号，并拒绝 `__isoc23_*` 或高于 `GLIBC_2.25` 的产物。两个变体在 WSL + 相机 sysroot 下均构建通过（A7C II 70,904 B、A6700 79,456 B，两者都只依赖 `GLIBC_2.17`）。
+- `A6700` 后端的 `pilot_menu_ui.c:2127` 检查补 `(size_t)g_detail_module_index < PILOT_LIST_ITEMS_MAX`，消除 gcc 15 对 `g_mod_enabled[16]` 的 `-Werror=array-bounds` 误报（行为等价）。
+- `modules/menu_ui/device.json` 改为双机型；`config.txt` 重写为准确的机型、状态与 A7C II 限制说明；`README.md` 补充适用机型表、构建命令与 sysroot/glibc 说明，并新增 `A7C2_PORT_STATUS.md`（结论摘要、已逆向的文本路径、仍缺的 5 个偏移、偏移速查）与 `a7c2_reverse_notes.md`（结构解构全过程）。
+- 已知限制（A7C II，离线未验收）：详情页正文尚未自定义、确认/返回/左右按键未接管、Live View 文本槽未接线；菜单列表本身可显示 Pilot 组与每个模块一行。
+- **MenuUI 的 A7C II 后端补齐 `pilot_ui_*` 导出**：`pilot_ui_set_rid_override_v1`（模块指定的 RID 文本在下一次重绘时被 `view_string` hook 替换，其他模块不必直连 appFw）与 `pilot_ui_register_options_v1`（收集选项表并记日志）。A6700 还导出 `pilot_ui_show_busy_v1`/`pilot_ui_hide_busy_v1`/`pilot_ui_text_show_v1`/`pilot_ui_text_clear_v1`/`pilot_lv_show_toast`/`pilot_ui_lv_force_refresh_v1`，A7C II 上没有对应钩子，故意不导出：调用方按 `PILOT_STATUS_NOT_FOUND` 处理，与「服务未加载」语义一致，不会误以为文本已经显示。两个后端都不导出 `pilot_ui_get_language_v1`，调用方回退英文。
