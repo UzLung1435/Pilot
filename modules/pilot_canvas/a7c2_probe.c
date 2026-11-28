@@ -119,6 +119,7 @@ static void *resolve(const char *name, int *missing)
 typedef uint32_t (*fn_gen_id)(const char *name);
 typedef void *(*fn_wgtsys)(void);
 typedef void *(*fn_create_layer)(void *self, const void *id);
+typedef void (*fn_layer_cfg)(void *self, int value);
 typedef void *(*fn_widget_ctor)(void *self);
 typedef void *(*fn_widget_set_size)(void *self, float w, float h);
 typedef void *(*fn_widget_set_layer_id)(void *self, const void *id);
@@ -150,6 +151,49 @@ static void probe_symbols(void)
     resolve("_ZN2ux6gfxeng6Sprite13setCurRectNumEt", &missing);
 
     log_msg("== symbol probe done, missing=%d ==", missing);
+}
+
+static void probe_layer_detail(void *layer, uint32_t id)
+{
+    void **vt;
+    int i;
+    fn_widget_ctor widget_ctor;
+    static unsigned char widget_buf[8192] __attribute__((aligned(16)));
+
+    vt = *(void ***)layer;
+    if (vt == 0) {
+        log_msg("layer detail: null vtable, stop");
+        return;
+    }
+
+    log_msg("layer detail: id=0x%08x vtable=%p", id, (void *)vt);
+    for (i = 0; i < 8; ++i)
+        log_msg("  vt[%d] = %p", i, vt[i]);
+
+    /* sub_17CCF6C 建完层立刻做这两步：vt[1](layer, 1) 与 vt[3](layer, 0) */
+    if (vt[1] != 0) {
+        fn_layer_cfg cfg = (fn_layer_cfg)(void *)vt[1];
+        log_msg("layer detail: calling vt[1](layer, 1)");
+        cfg(layer, 1);
+        log_msg("layer detail: vt[1] ok");
+    }
+    if (vt[3] != 0) {
+        fn_layer_cfg cfg = (fn_layer_cfg)(void *)vt[3];
+        log_msg("layer detail: calling vt[3](layer, 0)");
+        cfg(layer, 0);
+        log_msg("layer detail: vt[3] ok");
+    }
+
+    /* Widget 构造：先只验证能不能建出来，不调任何虚方法。 */
+    widget_ctor = (fn_widget_ctor)dlsym(RTLD_DEFAULT, "_ZN2ux6wgtsys6WidgetC2Ev");
+    if (!widget_ctor) {
+        log_msg("layer detail: Widget ctor missing");
+        return;
+    }
+    memset(widget_buf, 0, sizeof(widget_buf));
+    log_msg("layer detail: calling Widget ctor, buf=%p", (void *)widget_buf);
+    widget_ctor(widget_buf);
+    log_msg("layer detail: widget vptr=%p", *(void **)widget_buf);
 }
 
 static void probe_create_layer(void)
@@ -206,6 +250,10 @@ static void probe_create_layer(void)
     log_msg("layer probe: calling createLayer");
     layer = create_layer(wgtsys, &id);
     log_msg("layer probe: layer=%p", layer);
+
+    if (layer != 0) {
+        probe_layer_detail(layer, id);
+    }
 }
 
 static void *worker(void *arg)

@@ -154,3 +154,69 @@ FSYS_FILE_TRACE op=Open path=A:/pilot/log.txt     handle=61 flags=0x2 result=0
 ```json
 {"modules": ["MNUI.so", "CPROBE.so"]}
 ```
+## 探针实测：自建渲染层可行（2026-11-28，run-82228s3p）
+
+第一次把探针跑起来后，结论和静态分析时完全不同。
+
+### 1. RECT 后端可用
+
+`Sprite::setCurRectNum(unsigned short)`（`_ZN2ux6gfxeng6Sprite13setCurRectNumEt`）在运行时是存在的：
+
+```
+_ZN2ux6gfxeng6Sprite13setCurRectNumEt    0x7faa743134
+```
+
+它由 `libObj.so` 导出，但在 `appFw.so` 里没有对应的 PLT stub —— 静态扫符号表扫不到，`dlsym(RTLD_DEFAULT)` 却能拿到。`canvas_core.c` 里 `resolve_native()` 用的正是 `dlsym`，所以这条路径是通的。
+
+13 个探针符号里 12 个命中，唯一缺的是 `WidgetSystem::sys_getInstance`，用 `UXEngine::wgtsys()` 代回即可（后者返回 `.bss` 里的静态实例，实测 `0x1741bf0`）。
+
+### 2. 自建层成功
+
+```
+layer probe: ui ready after 0 ms, first layer=0x1745b60
+layer probe: calling createLayer
+layer probe: layer=0x1b1a990
+probe complete
+```
+
+`genID("PILOT_PROBE")` → `id=0xbd8496eb`，`createLayer` 返回非空的层对象，全程无崩溃。
+
+**UI 就绪判据**：`appFw.so + 0x5F66BF0`（`.bss`）非零。`sub_17CCF6C` 在 UI 启动时建 5 个全局层，第一个的指针就存在这里；只要它非零，`createLayer` 就是安全的。
+
+### 3. createLayer 是成员函数（踩过的坑）
+
+`createLayer(const core::ID&)` 的 `this` 在 x0、`ID&` 在 x1。第一次探针把它当普通函数写成 `(const void *id)`，于是 x0 变成 `&id`、x1 是垃圾，`libObj.so` 里解引用出地址 `0x2`：
+
+```
+SEGV (PC=0x7f9404aa00)      ← createLayer + 0x10
+DABT (lower EL) (0x92000006) at 0x2
+```
+
+真实调用序列在 `sub_17CCF6C` 里可以对照：
+
+```
+BL  UXEngine::wgtsys()      ; x0 = widget system
+MOV X1, X19                 ; x1 = &id
+BL  createLayer
+```
+
+### 4. 建层后要做两步配置
+
+`sub_17CCF6C` 每次建层后立刻调两个虚函数：
+
+```
+LDR X1, [X0]        ; vptr
+LDR X2, [X1, #8]    ; vtable[1]
+MOV W1, #1
+BLR X2              ; layer->vt[1](1)
+
+LDR X2, [X1, #0x18] ; vtable[3]
+MOV W1, #0
+BLR X2              ; layer->vt[3](0)
+```
+
+最新一版探针会 dump `vt[0..7]` 并尝试这两次调用，之后再试 `Widget::Widget()` 构造，确认 widget 对象能不能独立建出来。
+
+### 5. 对移植的含义
+
+`pilot_canvas` 的 RECT 后端不需要重写：`pilot_canvas_create_v1(w, h, RECT)` 自己 `Sprite` 构造 + `setCurRectNum` + `setRectPos/Size/Color`，缺的只是「把 sprite 挂到一个在屏幕上可见的 widget 上」这一步。A6700 上这一步由 `menu_ui` 递进来的 LV widget 完成；在 A7 C II 上改为自建层 + 自建 widget，把 `widget_init_sprite(widget, sprite, capacity)` 接上即可。
