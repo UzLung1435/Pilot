@@ -24,7 +24,8 @@
 - 新增 `modules/pilot_canvas`（由 Himpq-Pilot 移植）：Live View 原生画布、CP RAM OPD 实时波形/示波器、触摸拖拽与 `DISP` 虚拟显示页，并向其他模块导出绘图与多槽位文本接口。适配本仓库约定：补 `PILOT_DECLARE_MODULE_MODEL()` 机型标记；语言查询改为模块内自行 `dlsym("pilot_ui_get_language_v1")` 并回退英文，不再依赖 MenuUI 头里的声明；示例清单改为 `modules.txt` 的字符串数组；`build.sh` 按 `PILOT_MODEL`/`PILOT_SYSROOT` 选择 sysroot，非 `a6700` 目标直接拒绝，链接后校验 AArch64、无 `TEXTREL`、`pilot_module_init`/`pilot_module_model_a6700`/`pilot_canvas_probe_v1` 导出，并拒绝引用 `__isoc23_*` 或高于相机 glibc 2.25 的版本需求。相机 sysroot 的头文件与 2.25 桩库分别用 `-I`/`-L` 显式指定（`--sysroot` 会被交叉 gcc 内置的 `aarch64-linux-gnu/{include,lib}` 压过，编出桌面 glibc 2.38 的产物），产物只依赖 `GLIBC_2.17`。
 - MenuUI 的 A7C II 后端按「功能等价」路线推进：菜单行文本内联模块启用状态（`/pilot/disable` 全局标记与 `/pilot/modules/<名>/disable` 单模块标记都会让该行显示 `[off]`）；行描述符的打开目标从 `0x1C3`（实为 `dlg_rec231` 对话框）改为 `0x2CB`（`scr7001_1004`，96 个 non-setting 菜单项里有 44 个指向它的「组内项列表」屏）。同时修掉 `rid_text_set()` 只保存指针、调用方传栈缓冲会悬垂的问题，文本改由每槽 64 字节的内部缓冲持有。A7C II 产物 71,304 B（`0604f951…`），仅 `GLIBC_2.17`。
 - A7C II 的 MenuUI 后端把运行日志同时写进内核环形缓冲（`/dev/kmsg`，不可用时回退 `open("/dev/console", O_NONBLOCK)`），行首统一为 `pilot menu_ui:`：qemu 崩溃时 SD 卡无法回写，`module.log` 永远停在写入前，串口是唯一能看到"模块走到哪一步"的通道。除原有阶段日志外，注入过程会 dump 菜单表副本地址、category 0 的组计数、目标组槽与首行/首个描述符的十六进制内容，`view_string` 钩子在前 8 次命中时打印被替换的 RID 与文本。
-## v0.2.0（2026-11-24）
+- 串口日志的 `console_emit()` 不再缓存 `/dev/kmsg` 描述符，改为每行 `open`/`write`/`close`：实测前 8 行正常、之后全部静默丢失，框架会关闭或复用不属于自己的描述符。
+- 新增诊断构建开关 `PILOT_EXTRA_CFLAGS=-DPILOT_A7C2_NO_MENU_INJECT`：只加载模块、枚举清单、注册选项，完全不改菜单表，用于把 appFw 侧的故障与本模块写入的数据区分开。菜单枚举器 `sub_1B5AC70` 的完整遍历路径已写进 `a7c2_reverse_notes.md` 第十五节 —— 它按 `*(cat+0x08)`（组数）× `slot0` 的 rows 双循环，`vtable[2072]` = `sub_1B60228(obj, &row.gid, mode, out, …)`，在 `CBZ row.setting_desc` 之后才调 `sub_1B76638`/`sub_1B765B0`；崩溃点 `a1 = 0xb2e1` 是奇数，不可能是合法对象指针，而本模块写入的行 `setting_desc` 恒为 0（会在 `CBZ` 处被跳过），因此需要对照实验判定归属。默认产物 71,688 B，诊断版 71,256 B，都只依赖 `GLIBC_2.17`。## v0.2.0（2026-11-24）
 
 - 支持运行时修改 CP 代码区。
 - 优化 CP 内存读写和框架。

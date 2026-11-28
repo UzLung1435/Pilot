@@ -62,9 +62,11 @@ PILOT_DECLARE_MODULE_MODEL();
 static const PilotApi *g_api;
 static uintptr_t g_appfw_base;
 
+#ifndef PILOT_A7C2_NO_MENU_INJECT
 static uint8_t *g_menu_copy;    /* APPFW_MENU_TABLE_SIZE bytes */
 static uint8_t *g_desc_pool;    /* row_count * APPFW_DESC_SIZE */
 static size_t g_row_count;
+#endif
 
 static void *g_orig_set_string_rid;
 
@@ -95,35 +97,38 @@ static char g_rid_text_pool[PILOT_RID_LIST_ITEM_MAX + 4u][PILOT_RID_TEXT_MAX];
  * crash is lost.  Mirror every message to the kernel ring buffer (or the
  * console device when kmsg is unavailable) so the serial log keeps it.
  */
-static int g_console_fd = -1;
-static int g_console_is_kmsg;
-
+/*
+ * Reopen on every message.  A cached descriptor looked fine for the first few
+ * lines and then silently stopped producing output: the framework closes or
+ * reuses descriptors it does not own, so the only safe contract is one
+ * open/write/close per line.
+ */
 static void console_emit(const char *line)
 {
     char buf[320];
     int len;
+    int fd;
+    int is_kmsg = 1;
 
-    if (g_console_fd < 0) {
-        g_console_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-        g_console_is_kmsg = 1;
-        if (g_console_fd < 0) {
-            /* Non-blocking: an unread console must never stall the hook. */
-            g_console_fd = open("/dev/console", O_WRONLY | O_CLOEXEC | O_NONBLOCK);
-            g_console_is_kmsg = 0;
-        }
-        if (g_console_fd < 0)
-            return;
+    fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        /* Non-blocking: an unread console must never stall the hook. */
+        fd = open("/dev/console", O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+        is_kmsg = 0;
     }
+    if (fd < 0)
+        return;
 
-    if (g_console_is_kmsg)
+    if (is_kmsg)
         len = snprintf(buf, sizeof(buf), "<6>pilot menu_ui: %s\n", line);
     else
         len = snprintf(buf, sizeof(buf), "pilot menu_ui: %s\n", line);
     if (len > 0) {
-        ssize_t ignored = write(g_console_fd, buf, (size_t)len);
+        ssize_t ignored = write(fd, buf, (size_t)len);
 
         (void)ignored;
     }
+    (void)close(fd);
 }
 
 static void log_msg(const char *fmt, ...)
@@ -142,6 +147,7 @@ static void log_msg(const char *fmt, ...)
 
 /* Hex dump helper: the A7C II menu code walks these structures blindly, so a
  * field that is merely "wrong" shows up as a wild pointer deep inside appFw. */
+#ifndef PILOT_A7C2_NO_MENU_INJECT
 static void log_hex(const char *what, const void *ptr, size_t len)
 {
     const unsigned char *p = (const unsigned char *)ptr;
@@ -154,6 +160,7 @@ static void log_hex(const char *what, const void *ptr, size_t len)
         pos += snprintf(out + pos, sizeof(out) - (size_t)pos, " %02x", p[i]);
     log_msg("%s", out);
 }
+#endif /* PILOT_A7C2_NO_MENU_INJECT */
 
 static int appfw_base_cb(struct dl_phdr_info *info, size_t size, void *data)
 {
@@ -669,6 +676,7 @@ static void load_modules(void)
  * availability callback.  Everything else stays zero, which is what the
  * A6700 module does as well.
  */
+#ifndef PILOT_A7C2_NO_MENU_INJECT
 static void fill_desc(uint8_t *desc, uint32_t label_rid, uint32_t screen_id)
 {
     if (!desc)
@@ -792,6 +800,7 @@ static int install_menu_group(void)
             (unsigned)cat_count, (unsigned)g_row_count);
     return 0;
 }
+#endif /* PILOT_A7C2_NO_MENU_INJECT */
 
 /* ------------------------------------------------------------------ */
 /* Pilot option pages                                                 */
@@ -873,8 +882,15 @@ static void *worker(void *arg)
 
     load_modules();
     log_msg("manifest: %u module(s)", (unsigned)g_mod_count);
+#ifdef PILOT_A7C2_NO_MENU_INJECT
+    /* Diagnostic build: load, enumerate and register options, but leave the
+     * native menu table alone.  Used to tell an appFw-side fault apart from
+     * something this module wrote into the table. */
+    log_msg("menu injection disabled at build time");
+#else
     if (install_menu_group() != 0)
         log_msg("menu group NOT installed");
+#endif
     seed_texts();
     if (install_set_string_hook() != 0)
         log_msg("setString hook NOT installed");

@@ -37,6 +37,10 @@ case "$MODEL" in
         ;;
 esac
 
+# Optional extra compile-time switches, e.g. for a diagnostic build:
+#   PILOT_EXTRA_CFLAGS=-DPILOT_A7C2_NO_MENU_INJECT bash build.sh out.so
+EXTRA_FLAGS="${PILOT_EXTRA_CFLAGS:-}"
+
 # --- sysroot discovery ------------------------------------------------------
 SYSROOT=""
 if [ -n "${PILOT_SYSROOT:-}" ]; then
@@ -82,6 +86,9 @@ echo "model:    $MODEL"
 echo "source:   $MODULE_DIR/$SOURCE"
 echo "compiler: $CC"
 echo "sysroot:  $SYSROOT"
+if [ -n "$EXTRA_FLAGS" ]; then
+    echo "extra:    $EXTRA_FLAGS"
+fi
 if [ ${#INC_FLAGS[@]} -eq 0 ]; then
     echo "warning: $SYSROOT/usr/include is missing, the build will use the host headers" >&2
 fi
@@ -93,7 +100,7 @@ mkdir -p "$(dirname "$OUT")"
 # shellcheck disable=SC2086
 "$CC" -std=c11 -O2 -march=armv8-a -mno-outline-atomics \
     -fno-stack-protector -fPIC -fvisibility=hidden -Wall -Wextra -Werror \
-    $MODEL_FLAGS "${INC_FLAGS[@]}" \
+    $MODEL_FLAGS $EXTRA_FLAGS "${INC_FLAGS[@]}" \
     -I "$ROOT/patch" -I "$MODULE_DIR" \
     -c "$MODULE_DIR/$SOURCE" -o "$TMP/menu_ui.o"
 

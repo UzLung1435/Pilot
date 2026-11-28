@@ -418,3 +418,61 @@ presenter 建出来的 widget 上）。
 host 侧验证：`work/test_menu_inject.c` 读 `work/a7c2_menu_table_head.bin`
 （从 `appFw.so` 的 `0x051DF8C8` 起 12288 字节）重放注入算术，15 项断言全过：
 目标槽偏移 `0x2F8`、槽内全零、插入后组数 2、邻近组与槽 14 都不变。
+
+## 十五、菜单枚举器与 0x1B765B0 崩溃分析
+
+`sub_1B5AC70(a1 /*menu view*/, a2 /*mode 0..2*/, a3 /*u32 输出缓冲*/)` 是菜单的
+"category → 组 → 行" 枚举器，输入是 GOT `0x05B80EC0` 指向的菜单表：
+
+- `v6 = &unk_51DF8E0` = `table + 0x18` = category 0 的第一个组槽（`cat + 0x10`）
+- `*(v6 - 4)` = `cat + 0x00` 分类序号；`*(v6 - 2)` = `cat + 0x08` **组数**
+- 步进：category `0x2B30`、组槽 `0x2E0`、行 `24` 字节
+
+三个分支（按 `cat + 0x00` 分类代号）：
+
+| 代号 | 路径 |
+| --- | --- |
+| 0（"我的菜单"） | 内部 `while (v40 != 5)` 循环 + `vtable[0x820]`，`v11 = 3784*v7 + 12` |
+| 1 | `memcpy(v42, cat + 0x18, 736)` + `vtable[0x810]` 写到 `&a3[946*v7 + 2]` |
+| 其它 | `goto LABEL_14` |
+
+`LABEL_14` 是真正的逐行遍历：
+
+```c
+for (i = 0; i < *(v6 - 2); ++i) {            /* 该 category 的全部组 */
+    v18 = 736 * i;
+    while (v17 < v13[2]) {                    /* 注意：用 slot0 的 rows */
+        vtable[2072](a1,
+                     table + 0x2B30*v8 + 0x28 + 24*v17 + 736*i,  /* 行 v17 的 gid 地址 */
+                     a2,
+                     &a3[946*v7 + 6 + 2*v19] + 252*v10,
+                     &v43, &v44);
+    }
+}
+```
+
+`vtable[2072]` = `sub_1B60228`，完整调用链：
+
+```
+sub_1B5AC70 → sub_1B60228(obj, &row.gid, mode, out, x4, x5)
+                LDR W6,[X1]        ; row.gid 低 32 位
+                CMP W6,#0xB81      ; 0xB81 = 特殊行标记
+                LDR X0,[X1,#8]     ; row.setting_desc
+                CBZ X0 → 跳过这一行
+              → sub_1B76638(setting_desc)
+              → sub_1B765B0(setting_desc)      ; *(u16*)(a1 + 2*idx + 0x2C) == 1
+```
+
+崩溃时 `a1 = 0xb2e1`、`idx = 9`、访问 `0xb31f`。`a1` 是奇数而 `2*idx` 必为偶数，
+所以 `a1` 只能是垃圾值；`sub_1B5AC70` 里 `X19` 自 `MOV X19, X0` 起没有被改过，
+因此垃圾来自它的调用者。
+
+`sub_1B5AC70` 只有两个调用者，且都在数据段（`0x597DD28`、`0x597E8D8`）；
+`sub_1B60228` 的另两个槽在 `0x597DD90`、`0x597E940`。同一张函数指针表里连续的
+四个槽，说明它们是注册进去的回调，静态追不到调用点。
+
+**推论**：我方注入的行 `setting_desc = 0`，在 `CBZ X0` 处就会被跳过，不会走到
+`sub_1B765B0`；`gid` 也不等于 `0xB81`。因此这条链上的崩溃**不像是本模块写入
+的数据直接造成的**。判定归属需要一次对照实验：用
+`PILOT_EXTRA_CFLAGS=-DPILOT_A7C2_NO_MENU_INJECT` 构建一版完全不改菜单表的产物，
+同样的操作序列下如果仍然崩溃，故障就在 appFw 侧。

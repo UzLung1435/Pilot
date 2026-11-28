@@ -356,3 +356,31 @@ pilot menu_ui: init complete
 ```
 
 `view_string: rid 0x... -> "..."` 最多打印 8 行，用来确认行文本接管确实生效。崩溃前最后一条 `pilot menu_ui:` 就是嫌疑位置：缺 `group injected` 说明卡在表拷贝或槽校验，缺 `init complete` 说明卡在钩子安装。
+## 崩溃归属的对照实验（诊断构建）
+
+qemu 上按 Menu 键时 appFw 在 `sub_1B765B0` 崩（`a1 = 0xb2e1`、`idx = 9`、访问 `0xb31f`）。
+`a7c2_reverse_notes.md` 第十五节记录了枚举路径：崩溃函数的入参来自
+`row.setting_desc`，而本模块写入的行 `setting_desc` 恒为 0，在 `sub_1B60228` 的
+`CBZ` 处就被跳过，`gid` 也不等于特殊标记 `0xB81`。
+
+要确认故障归属，构建两个产物：
+
+| 产物 | 构建命令 | 行为 |
+| --- | --- | --- |
+| `pilot_menu_ui.so` | `bash modules/menu_ui/build.sh` | 注入菜单组（默认） |
+| `pilot_menu_ui_noinject.so` | `PILOT_EXTRA_CFLAGS=-DPILOT_A7C2_NO_MENU_INJECT bash modules/menu_ui/build.sh <out>` | 只加载、枚举模块、注册选项，**不改菜单表** |
+
+把 `noinject` 版复制成 `/pilot/MNUI.so` 后重现同样操作：
+
+- **仍然崩溃** → 故障在 appFw/qemu 侧，与本模块注入无关；
+- **不再崩溃** → 故障来自注入。此时优先换注入点：`cat0` 的分类代号是 0，走内部
+  `while (v40 != 5)` 特殊路径；代号 1 的 category 走 `memcpy` 分支，是更安全的落点。
+
+两份产物都在启动时往串口打印 `pilot menu_ui a7c2 <日期> <时间>`，用它确认卡上
+跑的到底是哪一版。
+
+### 串口日志缓存的教训
+
+第一版 `console_emit()` 缓存了 `/dev/kmsg` 的描述符，前 8 行正常、之后全部丢失
+（只剩 `FSYS_FILE_TRACE op=Open` 的痕迹）—— 框架会关闭或复用不属于自己的描述符。
+现在每行重新 `open`/`write`/`close`，单条消息最多 320 字节缓冲区，代价可以忽略。
