@@ -65,26 +65,32 @@
  *   GOT slot 0x05B80EC0 -> 0x051DF8C8 (.data.rel.ro), size 0x15480
  *
  * Layout:
- *   table   +0x00  u32  flag (0x08 in category 0, 0 elsewhere)
+ *   table header, 0x18 bytes at 0x051DF8C8:
+ *           +0x00  u32  category count (8)
+ *           +0x04  u32  0
+ *           +0x08  u32  0
  *           +0x0C  u32  table title RID (0x02006451)
  *           +0x10  u32  1
- *           +0x18  first category
+ *           +0x14  u32  0
+ *   Category 0 header is at table + 0x08 (0x051DF8D0), confirmed by
+ *   sub_1B59648 returning &dword_51DF8D0 + 0x2B30 * category.
  *
- *   category stride 0x2B30, 8 of them, starting at 0x051DF8E0:
+ *   category stride 0x2B30, 8 of them:
  *           +0x00  u32  flag (0x08 in category 0, 0 elsewhere)
- *           +0x08  u32  category id (0..7)
- *           +0x0C  u32  category title RID
- *           +0x10  u32  group count
- *           +0x18  15 group slots of 0x2E0 each
+ *           +0x04  u32  0
+ *           +0x08  u32  group count   <- sub_1B5A24C reads *(cat - 2)
+ *           +0x0C  u32  0
+ *           +0x10  15 group slots of 0x2E0 each (0x2B20 bytes total)
  *
  *   group slot stride 0x2E0:
- *           +0x00  u32  global group index (0..0x3d, 0x3f free)
+ *           +0x00  u32  global group index (0x3e next to 0x40, 0x3f free)
  *           +0x04  u32  group name RID
  *           +0x08  u32  row count
+ *           +0x0C  u32  0
  *           +0x10  row_count * 24 bytes:
  *                  { u64 group_id; u64 setting_desc; u64 non_setting_desc; }
  *
- * Category 0 (0x051DF8C8) has count=1 and group slots 1..14 are all zero,
+ * Category 0 (0x051DF8D0) has count=1 and group slots 1..14 are all zero,
  * exactly the "append a group here" situation the A6700 module relies on.
  */
 #define APPFW_GOT_MENU_TABLE         0x05B80EC0ull
@@ -94,10 +100,9 @@
 #define APPFW_MENU_CAT_SIZE          0x2B30ull
 #define APPFW_MENU_CAT_GROUPS        15u
 #define APPFW_MENU_CAT_FLAG_OFF      0x00ull
-#define APPFW_MENU_CAT_ID_OFF        0x08ull
-#define APPFW_MENU_CAT_TITLE_OFF     0x0Cull
-#define APPFW_MENU_CAT_COUNT_OFF     0x10ull
-#define APPFW_MENU_CAT_GROUP_OFF     0x18ull
+#define APPFW_MENU_CAT_BASE_OFF      0x08ull
+#define APPFW_MENU_CAT_COUNT_OFF     0x08ull
+#define APPFW_MENU_CAT_GROUP_OFF     0x10ull
 #define APPFW_MENU_GROUP_SIZE        0x2E0ull
 #define APPFW_MENU_GROUP_INDEX_OFF   0x00ull
 #define APPFW_MENU_GROUP_RID_OFF     0x04ull

@@ -247,3 +247,41 @@ b00: br  x16
 教训：任何从手写汇编进入 C 再回到“继续执行被搬迁指令”的钩子，都必须把
 后续指令会读取的寄存器原样恢复；`x0-x7`、`x16/x17` 都是 caller-saved，
 不能假设 C 函数会保留。
+## 实机日志：菜单里看不到 Pilot 组
+
+第二次实机运行（qemu）的 `LOG.TXT` 显示模块正常加载：
+
+```
+1970-01-01T00:00:28Z name=MNUI.so Pilot module initialized index=1/1 status=0
+PILOT_FUSE state=COMPLETE package=C5C971E1450AF6CB
+```
+
+但菜单里没有 Pilot 组。根因是菜单表 `category` 结构的三个偏移全错了一位：
+
+| 字段 | 错误实现 | 正确值 |
+| --- | --- | --- |
+| category 0 基址 | `table + 0x18` | `table + 0x08`（`0x051DF8D0`） |
+| 组数 | `cat + 0x10` | `cat + 0x08` |
+| 第一个组槽 | `cat + 0x18` | `cat + 0x10` |
+
+于是目标槽被算成 `table + 0x30`，正好落在 cat0 第一个组的行数组上；
+那里有非零的 `setting_desc` 指针，`memcmp` 校验失败后代码主动放弃注入，
+所以菜单里什么都没有，日志也只留一行失败原因。
+
+修正后：`install_menu_group()` 读 `table + 0x08` 的分类头、`cat + 0x08` 的
+组数（cat0 = 1）、目标槽落在 `table + 0x2F8`（`0x051DFBC0`），该槽 0x2E0
+字节全零。
+
+离线验证加进仓库：`tests/test_menu_table_layout.c` 用真实菜单表前 0x3000
+字节重放同一套算术，15 项断言全部通过（目标槽偏移、槽内全零、插入后组数
+变为 2、原有组与槽 14 不受影响）。数据用 IDAPython 导出：
+
+```python
+open('a7c2_menu_table_head.bin','wb').write(get_bytes(0x051DF8C8, 0x3000))
+```
+
+修复后产物 71,392 B，sha256
+`c12aa32427ed19b284e0f20385c07d9d35d74f6eb4bb223ae3bdce8bc806ac12`。
+注入的组落在**第一个菜单分类**（cat0，标题 RID `0x02006451`）的最后一个位置；
+组名 RID `0x02FFFF00` 在相机资源里不存在，靠 `setString` / `view_string` 钩子
+替换成 "Pilot"，若看不到组名只剩空行，说明钩子没生效。

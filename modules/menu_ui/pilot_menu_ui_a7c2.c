@@ -628,7 +628,7 @@ static int install_menu_group(void)
         return -1;
     }
 
-    cat0 = g_menu_copy + APPFW_MENU_CAT_GROUP_OFF;
+    cat0 = g_menu_copy + APPFW_MENU_CAT_BASE_OFF;
     cat_count = get_u32(cat0, APPFW_MENU_CAT_COUNT_OFF);
     if (cat_count >= APPFW_MENU_CAT_GROUPS) {
         log_msg("category 0 is full (count=%u)", (unsigned)cat_count);
