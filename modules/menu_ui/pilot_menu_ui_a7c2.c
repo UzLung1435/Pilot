@@ -113,10 +113,13 @@ static int appfw_base_cb(struct dl_phdr_info *info, size_t size, void *data)
     return 1;
 }
 
-static int read_mem(uintptr_t off, void *dst, size_t len)
+static int read_mem_status(uintptr_t off, void *dst, size_t len,
+                           PilotStatus *status)
 {
     size_t done = 0;
 
+    if (status)
+        *status = PILOT_STATUS_INVALID_ARGUMENT;
     if (!g_api || !g_api->memory_read || !g_appfw_base)
         return -1;
     /*
@@ -126,16 +129,27 @@ static int read_mem(uintptr_t off, void *dst, size_t len)
      */
     while (done < len) {
         size_t chunk = len - done;
+        PilotStatus rc;
 
         if (chunk > 4096u)
             chunk = 4096u;
-        if (g_api->memory_read(g_appfw_base + off + done,
-                               (uint8_t *)dst + done, chunk) !=
-            PILOT_STATUS_OK)
+        rc = g_api->memory_read(g_appfw_base + off + done,
+                                (uint8_t *)dst + done, chunk);
+        if (rc != PILOT_STATUS_OK) {
+            if (status)
+                *status = rc;
             return -1;
+        }
         done += chunk;
     }
+    if (status)
+        *status = PILOT_STATUS_OK;
     return 0;
+}
+
+static int read_mem(uintptr_t off, void *dst, size_t len)
+{
+    return read_mem_status(off, dst, len, NULL);
 }
 
 static int patch_mem(uintptr_t off, const void *src, size_t len)
@@ -638,10 +652,23 @@ static int install_menu_group(void)
         log_msg("menu table copy allocation failed");
         return -1;
     }
-    if (read_mem(APPFW_MENU_TABLE_OFF, g_menu_copy, APPFW_MENU_TABLE_SIZE) !=
-        0) {
-        log_msg("menu table copy failed");
-        return -1;
+    {
+        size_t copied = 0;
+
+        while (copied < (size_t)APPFW_MENU_TABLE_SIZE) {
+            size_t chunk = (size_t)APPFW_MENU_TABLE_SIZE - copied;
+            PilotStatus rc;
+
+            if (chunk > 4096u)
+                chunk = 4096u;
+            if (read_mem_status((uintptr_t)(APPFW_MENU_TABLE_OFF + copied),
+                                g_menu_copy + copied, chunk, &rc) != 0) {
+                log_msg("menu table copy failed at +0x%x (%u bytes): %d",
+                        (unsigned)copied, (unsigned)chunk, (int)rc);
+                return -1;
+            }
+            copied += chunk;
+        }
     }
 
     cat0 = g_menu_copy + APPFW_MENU_CAT_BASE_OFF;
@@ -770,6 +797,7 @@ static void *worker(void *arg)
         log_msg("appFw.so not found");
         return NULL;
     }
+    log_msg("pilot menu_ui a7c2 %s %s", __DATE__, __TIME__);
     log_msg("appFw base = %p", (void *)g_appfw_base);
 
     load_modules();
