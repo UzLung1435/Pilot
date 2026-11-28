@@ -240,6 +240,10 @@ afc: ldr x16, [x16, #3912]
 b00: br  x16
 ```
 
+如需把 inline hook 排除掉做对照，构建时加 `-DPILOT_A7C2_NO_INLINE_HOOK`
+（或 `PILOT_CFLAGS` 传递），此时只剩 GOT 层的 `setString` 钩子；日志会打印
+`view_string hook disabled at build time`。
+
 教训：任何从手写汇编进入 C 再回到“继续执行被搬迁指令”的钩子，都必须把
 后续指令会读取的寄存器原样恢复；`x0-x7`、`x16/x17` 都是 caller-saved，
 不能假设 C 函数会保留。

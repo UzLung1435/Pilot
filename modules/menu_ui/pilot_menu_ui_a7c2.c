@@ -262,6 +262,12 @@ static int install_set_string_hook(void)
 /* view_string::draw hook                                             */
 /* ------------------------------------------------------------------ */
 /*
+ * Build with -DPILOT_A7C2_NO_INLINE_HOOK to keep only the GOT-level
+ * setString hook.  Useful as a control build if the inline hook misbehaves
+ * on a firmware revision whose prologue bytes we have not verified.
+ */
+#ifndef PILOT_A7C2_NO_INLINE_HOOK
+/*
  * Every piece of menu text in A7C II finally goes through
  * `view_string::draw` at appFw + A7C2_VS_DRAW_OFF: it reads either a
  * text RID (+0x208) or a plain C string (+0x210) from the view object
@@ -385,6 +391,7 @@ static int install_view_string_hook(void)
     log_msg("view_string hook at %p", (void *)target);
     return 0;
 }
+#endif /* PILOT_A7C2_NO_INLINE_HOOK */
 
 /* ------------------------------------------------------------------ */
 /* Menu descriptors                                                   */
@@ -755,8 +762,12 @@ static void *worker(void *arg)
     seed_texts();
     if (install_set_string_hook() != 0)
         log_msg("setString hook NOT installed");
+#ifndef PILOT_A7C2_NO_INLINE_HOOK
     if (install_view_string_hook() != 0)
         log_msg("view_string hook NOT installed");
+#else
+    log_msg("view_string hook disabled at build time");
+#endif
 
     register_options();
 
