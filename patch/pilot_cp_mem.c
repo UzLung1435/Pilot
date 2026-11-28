@@ -20,10 +20,21 @@
 #define PILOT_CP_PCIDMA_RD 0u
 #define PILOT_CP_PCIDMA_WR 1u
 #define PILOT_CP_IMAGE_RO_END 0x01000000ull
+#ifdef PILOT_MODEL_A7C2
+/* ILCE-7CM2 2.01: the receiver hook sits at 0x004B3B0A and its cave at
+ * 0x00C63EA4 (see patch/cp/a7c2_uipc_v4/link.ld).  The code and data windows
+ * are the A6700 bounds because this firmware's DRAM layout has not been
+ * measured yet; widen them when a target outside them has to be written. */
+#define PILOT_CP_CODE_START   0x00128000ull
+#define PILOT_CP_CODE_END     0x011D8000ull
+#define PILOT_CP_SELF_START   0x00C63EA4ull
+#define PILOT_CP_SELF_END     0x00C641A4ull
+#else
 #define PILOT_CP_CODE_START   0x00128000ull
 #define PILOT_CP_CODE_END     0x011D8000ull
 #define PILOT_CP_SELF_START   0x00C12D68ull
 #define PILOT_CP_SELF_END     0x00C12FC0ull
+#endif
 #define PILOT_CP_UIPC_ROUTE          0x90030001u
 #define PILOT_CP_UIPC_CMD            0x7Eu
 #define PILOT_CP_UIPC_VER_V3         3u
@@ -33,7 +44,11 @@
 #define PILOT_CP_UIPC_V4_INLINE_MAX  2048u
 #define PILOT_CP_UIPC_BYTES          20u
 #define PILOT_CP_UIPC_TIMEOUT        1000
+#ifdef PILOT_MODEL_A7C2
+#define PILOT_CP_UIPC_STAT_VA        0x00C64180ull
+#else
 #define PILOT_CP_UIPC_STAT_VA        0x00C12FA0ull
+#endif
 #define PILOT_CP_UIPC_MAGIC          0x50544348u
 #define PILOT_CP_UIPC_WAIT_US        1000000u
 #define PILOT_CP_UIPC_FAST_STEP_US   200u
