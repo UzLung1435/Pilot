@@ -13,6 +13,7 @@
 
 #include <dlfcn.h>
 #include <link.h>
+#include <stdio.h>
 #include <time.h>
 
 #include "pilot_canvas_internal.h"
@@ -196,20 +197,58 @@ static int host_create_widget(void)
     return 1;
 }
 
+/* Current widget origin on the layer, shared by the renderer and the drag
+   handler. */
+static int g_widget_x;
+static int g_widget_y;
+
+/* Double tapping the canvas cycles through the demo views; there is no DISP
+   key wire-up on A7 C II yet, and a tap target is easier to hit anyway. */
+static int g_view;
+#define HOST_VIEW_COUNT 3
+
 static void host_draw(PilotCanvas *c, int tick)
 {
+    char line[32];
     int x;
 
     pilot_canvas_clear_v1(c, 0xFF101418u);
     pilot_canvas_draw_grid_v1(c, 8, 9, 5, 0xFF203040u);
 
-    for (x = 0; x < HOST_W; ++x) {
-        int phase = (x * 2 + tick * 6) % 240;
-        int y = phase < 120 ? phase : 240 - phase;
+    switch (g_view % HOST_VIEW_COUNT) {
+    case 0:
+        for (x = 0; x < HOST_W; ++x) {
+            int phase = (x * 2 + tick * 6) % 240;
+            int y = phase < 120 ? phase : 240 - phase;
 
-        pilot_canvas_fill_rect_v1(c, x, 20 + y, 1, 2, 0xFF40E0A0u,
-                                  PILOT_CANVAS_BLEND_NONE);
+            pilot_canvas_fill_rect_v1(c, x, 20 + y, 1, 2, 0xFF40E0A0u,
+                                      PILOT_CANVAS_BLEND_NONE);
+        }
+        break;
+    case 1:
+        for (x = 0; x < 32; ++x) {
+            int h = ((x * 37 + tick * 3) % 90) + 10;
+
+            pilot_canvas_fill_rect_v1(c, 8 + x * 18, HOST_H - 24 - h, 14, h,
+                                      0xFF40A0E0u, PILOT_CANVAS_BLEND_NONE);
+        }
+        break;
+    default:
+        break; /* grid only */
     }
+
+    /* OSD text needs no TextSprite: canvas_core draws it as RECT runs from its
+       own 5x7 font, so it works on the A7 C II host widget unchanged.  The
+       font covers 0-9 A B C D E F G H I L M N O P R S T U V W X Y m x . : - %
+       only -- anything else advances the cursor and draws nothing. */
+    snprintf(line, sizeof(line), "A7C2 %d %d", g_widget_x, g_widget_y);
+    pilot_canvas_draw_osd_text_v1(c, 4, 4, 2, 0xFFFFFFFFu, 0x00000000u, line);
+    snprintf(line, sizeof(line), "VIEW %d", g_view % HOST_VIEW_COUNT + 1);
+    pilot_canvas_draw_osd_text_v1(c, HOST_W - 84, 4, 2, 0xFFFFE080u,
+                                  0x00000000u, line);
+    snprintf(line, sizeof(line), "TICK %d", tick & 0xFF);
+    pilot_canvas_draw_osd_text_v1(c, 4, HOST_H - 20, 2, 0xFFC0D0E0u,
+                                  0x00000000u, line);
     pilot_canvas_commit_v1(c);
 }
 
@@ -278,8 +317,12 @@ static int g_touch_y;
 static int g_drag_active;
 static int g_drag_dx;
 static int g_drag_dy;
-static int g_widget_x;
-static int g_widget_y;
+
+/* Double-tap detector: two presses within 350 ms and 24 px of each other. */
+static int g_have_last_press;
+static unsigned int g_last_press_ms;
+static int g_last_press_x;
+static int g_last_press_y;
 
 static int host_read_mem(uintptr_t addr, void *dst, size_t len)
 {
@@ -337,15 +380,38 @@ static void host_mouse_move(void *self, uint8_t finger, int16_t x, int16_t y,
 static void host_mouse_press(void *self, uint8_t finger, uint8_t btn,
                              const void *msec)
 {
-    if (g_touch_has_pos && g_widget_set_local_pos != NULL &&
+    unsigned int now = msec != NULL ? *(const unsigned int *)msec : 0u;
+    int is_double = 0;
+
+    if (g_have_last_press && (now - g_last_press_ms) < 350u) {
+        int dx = g_touch_x - g_last_press_x;
+        int dy = g_touch_y - g_last_press_y;
+
+        if (dx > -24 && dx < 24 && dy > -24 && dy < 24)
+            is_double = 1;
+    }
+    g_have_last_press = 1;
+    g_last_press_ms = now;
+    g_last_press_x = g_touch_x;
+    g_last_press_y = g_touch_y;
+
+    if (g_touch_has_pos &&
         g_touch_x >= g_widget_x && g_touch_x < g_widget_x + HOST_W &&
         g_touch_y >= g_widget_y && g_touch_y < g_widget_y + HOST_H) {
-        g_drag_active = 1;
-        g_drag_dx = g_touch_x - g_widget_x;
-        g_drag_dy = g_touch_y - g_widget_y;
-        hlog("HOST a7c2: drag start %d,%d (widget %d,%d)",
-             g_touch_x, g_touch_y, g_widget_x, g_widget_y);
-        return;
+        if (is_double) {
+            g_have_last_press = 0; /* require a fresh pair for the next cycle */
+            g_view = (g_view + 1) % HOST_VIEW_COUNT;
+            hlog("HOST a7c2: double tap -> view %d", g_view + 1);
+            return;
+        }
+        if (g_widget_set_local_pos != NULL) {
+            g_drag_active = 1;
+            g_drag_dx = g_touch_x - g_widget_x;
+            g_drag_dy = g_touch_y - g_widget_y;
+            hlog("HOST a7c2: drag start %d,%d (widget %d,%d)",
+                 g_touch_x, g_touch_y, g_widget_x, g_widget_y);
+            return;
+        }
     }
     if (g_orig_mouse_press)
         g_orig_mouse_press(self, finger, btn, msec);
