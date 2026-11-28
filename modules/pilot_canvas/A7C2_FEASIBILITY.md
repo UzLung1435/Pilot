@@ -220,3 +220,42 @@ BLR X2              ; layer->vt[3](0)
 ### 5. 对移植的含义
 
 `pilot_canvas` 的 RECT 后端不需要重写：`pilot_canvas_create_v1(w, h, RECT)` 自己 `Sprite` 构造 + `setCurRectNum` + `setRectPos/Size/Color`，缺的只是「把 sprite 挂到一个在屏幕上可见的 widget 上」这一步。A6700 上这一步由 `menu_ui` 递进来的 LV widget 完成；在 A7 C II 上改为自建层 + 自建 widget，把 `widget_init_sprite(widget, sprite, capacity)` 接上即可。
+## 已实现：自建宿主接管 canvas 绘制
+
+`a7c2_host.c` 把探针验证过的链路落成模块后端，A7C2 构建的 `worker()` 直接走它：
+
+1. `dl_iterate_phdr` 找 `appFw.so` 基址；
+2. 轮询 `base + 0x5F66BF0`（`sub_17CCF6C` 写第一个全局层指针的地方）直到 UI 起来；
+3. `ID::genID("PILOT_CV")` → `WidgetSystem::createLayer(this, &id)` → `vt[1](layer,1)`、`vt[3](layer,0)`；
+4. `Widget::C2(obj)` + `setSize(600,300)` + `setLayerID(&id)`，对象放模块内的 16 KiB 对齐缓冲；
+5. `pilot_canvas_create_v1(600,300,PILOT_CANVAS_BACKEND_RECT)` + `pilot_canvas_bind_widget_v1(c, widget)`；
+6. 33 ms 一帧：`clear` → `draw_grid(8,9,5)` → 600 条三角波竖条 `fill_rect` → `commit`。
+
+调用约定要点（第一轮实测踩过）：`createLayer` 是成员函数，`this` 在 x0、
+`const core::ID&` 在 x1；按非成员函数写会让 libObj 解引用出地址 2 而崩。
+
+`Sprite::setCurRectNum` 在 `appFw.so` 里没有 PLT stub（只有 5 处代码直接
+`adrp/add` 到原生表时才会暴露），静态扫符号表会漏判；`dlsym(RTLD_DEFAULT)`
+拿得到（`0x7f9403d134`），所以 RECT 后端不需要重写。
+
+## 构建与安装
+
+```
+PILOT_MODEL=a7c2 bash modules/pilot_canvas/build.sh build/CANVAS.so
+```
+
+产物 71,304 B（sha256 `4e2d985d…`），仅 `GLIBC_2.17`。卡上文件名必须是 8.3：
+`/pilot/CANVAS.so`，`modules.txt` 里写 `"CANVAS.so"`（扩展名小写，见
+`patch/pilot_modules.c:78`）。
+
+## 尚未移植（A7C2 构建不含这些源文件）
+
+| 功能 | 需要的原生设施 | 现状 |
+| --- | --- | --- |
+| 触摸拖动/保存 `layout.cfg` | 触摸事件 GOT（已定位：`0x05BC2AC8/0x05BC21F8/0x05BC20B8`） | 未接 |
+| DISP 虚拟页 | DISP 键 GOT | 未定位 |
+| 多行文本槽 `canvas_text.c` | LV 文本槽宿主 | 无来源（死数据） |
+| OPD 波形/示波器 `canvas_scope_widget.c` | CP RAM OPD 表地址 | 未定位 |
+| 焦距/几何显示 | CP lens info 地址 | 未定位 |
+
+下一步建议先接触摸（GOT 已有），再找 CP RAM OPD 表，最后做示波器组件。

@@ -30,12 +30,18 @@
 
 Pilot 按机型隔离构建与加载：模块必须与框架用同一个 `PILOT_MODEL` 构建，框架在 `dlopen()` 之后、`pilot_module_init()` 之前校验模块导出的 `pilot_module_model_<model>` 标记（见 [`patch/pilot_modules.c`](../../patch/pilot_modules.c)），标记不符的模块不会执行任何初始化代码。
 
-本模块目前**只支持 A6700**：
+支持 A6700 与 A7 C II 两个机型，但覆盖范围不同：
 
-- `canvas_core.c` / `canvas_text.c` / `canvas_panel.c` 使用的 appFw.so GOT 槽位（帧回调、触摸、DISP 键）与 DISP 模式 BSS 偏移是在 ILCE-6700 2.00 上定位的；
-- `canvas_cp_sensors.c` 的 CP RAM OPD 表、镜头信息、WB 增益与几何地址同样是 A6700 专用。
+| 机型 | 构建 | 覆盖内容 |
+| --- | --- | --- |
+| ILCE-6700 | `PILOT_MODEL=a6700`（默认） | 全部：画布、文本槽、触摸/DISP、CP 传感器、Live View 示波器 |
+| ILCE-7CM2 | `PILOT_MODEL=a7c2` | 画布绘制 + 自建渲染层（`a7c2_host.c`） |
 
-因此在其他机型上这些地址会指向无关内存，[`build.sh`](build.sh) 在 `PILOT_MODEL` 不是 `a6700` 时直接拒绝构建。`device.json` 据此标注 `a6700`。
+A6700 的 `canvas_core.c` / `canvas_text.c` / `canvas_panel.c` 使用的 appFw.so GOT 槽位（帧回调、触摸、DISP 键）与 DISP 模式 BSS 偏移都是在 ILCE-6700 2.00 上定位的，`canvas_cp_sensors.c` 的 CP RAM OPD 表、镜头信息、WB 增益与几何地址同样是 A6700 专用；A7 C II 地址不同且部分设施不存在，所以 A7C2 构建只链接 `pilot_canvas.c`、`canvas_core.c`、`a7c2_host.c` 三个源文件。
+
+A7 C II 没有可复用的 Live View widget（A6700 由 `menu_ui` 的 `pilot_lv_text_widget.inc` 递入），因此 `a7c2_host.c` 自己用 `WidgetSystem::createLayer` 建渲染层与 widget，再绑定 canvas。详见 [`A7C2_FEASIBILITY.md`](A7C2_FEASIBILITY.md)。
+
+**卡上文件名必须是 8.3**：相机 `Fsys` 只认 8.3 短名，`pilot_canvas.so`（16 字符）无法打开，A7 C II 请用 `CANVAS.so`（`modules.txt` 里写 `"CANVAS.so"`，扩展名必须小写）。
 
 ## 依赖
 

@@ -1,4 +1,4 @@
-/* Pilot Canvas module entry point (A6700 2.00).
+/* Pilot Canvas module entry point.
  *
  * Modular layout:
  *   canvas_core.c         - Native gfxeng/Sprite backend, batch/grid/OSD text
@@ -6,13 +6,19 @@
  *   canvas_panel.c        - Reusable PilotPanel container, touch, DISP, config
  *   canvas_cp_sensors.c   - CP RAM OPD 12-bit grid, focal length, geometry
  *   canvas_scope_widget.c - Live View RGB Curve / Parade / Waveform widget
+ *   a7c2_host.c           - A7 C II only: build our own layer and widget
+ *
+ * A6700 takes the widget that menu_ui hands over.  A7 C II has no such link
+ * (the Live View text slot tables in .rodata are dead data there), so the
+ * A7C2 build creates its own render layer through WidgetSystem::createLayer
+ * and drives the canvas from there.
  */
 
 #include "pilot_canvas_internal.h"
 
 /* This Pilot tree refuses a module that does not export the tag of the body
  * loading it, so the tag must come from the same PILOT_MODEL_* macro as the
- * framework build (build.sh pins it to A6700, see README.md). */
+ * framework build. */
 PILOT_DECLARE_MODULE_MODEL();
 
 static pthread_mutex_t g_init_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -21,6 +27,12 @@ static int g_started;
 static void *worker(void *arg)
 {
     (void)arg;
+
+#ifdef PILOT_MODEL_A7C2
+    /* No Live View widget to reuse: build our own layer/widget and render. */
+    pilot_canvas_a7c2_host_run();
+    return NULL;
+#else
     canvas_scope_widget_init();
     canvas_config_load();
     (void)pilot_canvas_probe_v1();
@@ -41,6 +53,7 @@ static void *worker(void *arg)
         nanosleep(&ts, NULL);
     }
     return NULL;
+#endif
 }
 
 __attribute__((visibility("default")))

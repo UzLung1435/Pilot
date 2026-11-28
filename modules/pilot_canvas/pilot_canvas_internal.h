@@ -122,6 +122,10 @@ extern const PilotApi *g_api;
 
 PilotStatus  pilot_canvas_probe_v1(void);
 PilotCanvas *pilot_canvas_create_v1(u16 w, u16 h, PilotCanvasBackend backend);
+
+/* A7 C II: no Live View widget is handed in, so build our own layer and
+ * widget.  Never returns; called from pilot_canvas.c's worker on A7C2. */
+void         pilot_canvas_a7c2_host_run(void);
 void         pilot_canvas_destroy_v1(PilotCanvas *c);
 void         pilot_canvas_begin_batch_v1(PilotCanvas *c);
 void         pilot_canvas_end_batch_v1(PilotCanvas *c);

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Build pilot_canvas.so for the A6700.
+# Build pilot_canvas.so for the A6700 or the A7 C II.
 #
-#   PILOT_SYSROOT=/path/to/a6700-sysroot bash modules/pilot_canvas/build.sh
-#   PILOT_MODEL=a6700 PILOT_A6700_SYSROOT=... AARCH64_CC=aarch64-linux-gnu-gcc-11 \
-#       bash modules/pilot_canvas/build.sh [output.so]
+#   PILOT_SYSROOT=/path/to/sysroot bash modules/pilot_canvas/build.sh
+#   PILOT_MODEL=a7c2 PILOT_SYSROOT=... bash modules/pilot_canvas/build.sh
 #
 # PILOT_SYSROOT/PILOT_CC follow patch/build_pilot_dso.sh, while
 # PILOT_A6700_SYSROOT/AARCH64_CC keep the names modules/menu_ui/build.sh uses.
@@ -14,25 +13,45 @@ MODULE_DIR="$ROOT/modules/pilot_canvas"
 BUILD_DIR="$ROOT/build"
 MODEL="${PILOT_MODEL:-a6700}"
 
-# canvas_core.c, canvas_text.c, canvas_panel.c and canvas_cp_sensors.c all
-# reach hard-coded appFw.so GOT slots, DISP mode BSS offsets and CP RAM
-# addresses measured on ILCE-6700 firmware 2.00.  On another body those
-# addresses point at unrelated memory, so the module must not be built for one.
-if [ "$MODEL" != "a6700" ]; then
-    cat >&2 <<EOF
-pilot_canvas targets the A6700 only: PILOT_MODEL=$MODEL is not supported.
-The module reaches A6700 2.00 native addresses (appFw.so GOT slots for the
-frame/touch/DISP hooks, DISP mode BSS, CP RAM OPD table) that have not been
-located on any other body.
-EOF
+# The A6700 build covers the full module: native draw surface, text slots,
+# touch/DISP hooks, CP sensors and the Live View scope widget.  The A7 C II
+# build only covers what has been ported there: the draw surface plus the
+# self-built layer/widget host (a7c2_host.c).  canvas_text/canvas_panel/
+# canvas_cp_sensors/canvas_scope_widget all reach hard-coded A6700 2.00
+# addresses (appFw.so GOT slots, DISP mode BSS, CP RAM OPD table) and are not
+# linked into the A7C2 DSO.
+if [ "$MODEL" = "a7c2" ]; then
+    SRC_FILES=(pilot_canvas.c canvas_core.c a7c2_host.c)
+    MODEL_FLAGS=(-DPILOT_MODEL_A7C2)
+    MODEL_SYMBOL=pilot_module_model_a7c2
+    DEFAULT_SYSROOT=/opt/a7c2-sysroot
+elif [ "$MODEL" = "a6700" ]; then
+    SRC_FILES=(
+        pilot_canvas.c
+        canvas_core.c
+        canvas_text.c
+        canvas_panel.c
+        canvas_cp_sensors.c
+        canvas_scope_widget.c
+    )
+    MODEL_FLAGS=(-DPILOT_MODEL_A6700)
+    MODEL_SYMBOL=pilot_module_model_a6700
+    DEFAULT_SYSROOT=/home/cameraemu/.cache/a6700-kernel-20230712/a6700-original-boot/pilot-merged-root-test
+else
+    echo "unknown PILOT_MODEL=$MODEL (expected a6700 or a7c2)" >&2
     exit 1
 fi
 
-DEFAULT_SYSROOT=/home/cameraemu/.cache/a6700-kernel-20230712/a6700-original-boot/pilot-merged-root-test
 # A sysroot unpacked out of the firmware next to this checkout, used by the
 # patch tooling; preferred over the historical absolute path when present.
 LOCAL_SYSROOT="$ROOT/../work/pilot-a7c2/sysroot"
-SYSROOT="${PILOT_SYSROOT:-${PILOT_A6700_SYSROOT:-}}"
+SYSROOT="${PILOT_SYSROOT:-}"
+if [ -z "$SYSROOT" ] && [ "$MODEL" = "a6700" ] && [ -n "${PILOT_A6700_SYSROOT:-}" ]; then
+    SYSROOT="$PILOT_A6700_SYSROOT"
+fi
+if [ -z "$SYSROOT" ] && [ "$MODEL" = "a7c2" ] && [ -n "${PILOT_A7C2_SYSROOT:-}" ]; then
+    SYSROOT="$PILOT_A7C2_SYSROOT"
+fi
 if [ -z "$SYSROOT" ]; then
     if [ -d "$LOCAL_SYSROOT/usr/include" ] || [ -d "$LOCAL_SYSROOT/lib" ]; then
         SYSROOT="$LOCAL_SYSROOT"
@@ -68,18 +87,11 @@ elif [ -d "$SYSROOT/usr/lib" ]; then
     SYS_LIB="$SYSROOT/usr/lib"
 fi
 
+echo "model:     $MODEL"
+echo "sources:   ${SRC_FILES[*]}"
 echo "sysroot:   $SYSROOT"
 echo "headers:   ${SYS_INC:-<host compiler defaults>}"
 echo "libraries: ${SYS_LIB:-<host compiler defaults>}"
-
-SRCS=(
-    pilot_canvas.c
-    canvas_core.c
-    canvas_text.c
-    canvas_panel.c
-    canvas_cp_sensors.c
-    canvas_scope_widget.c
-)
 
 mkdir -p "$(dirname "$OUT")"
 INC_FLAGS=()
@@ -87,11 +99,11 @@ if [ -n "$SYS_INC" ]; then INC_FLAGS=(-I "$SYS_INC"); fi
 LIB_FLAGS=()
 if [ -n "$SYS_LIB" ]; then LIB_FLAGS=(-L "$SYS_LIB"); fi
 OBJS=()
-for src in "${SRCS[@]}"; do
+for src in "${SRC_FILES[@]}"; do
     obj="$TMP/${src%.c}.o"
     "$CC" -std=c11 -O2 -march=armv8-a -mno-outline-atomics \
         -fno-stack-protector -fPIC -fvisibility=hidden -Wall -Wextra -Werror \
-        -DPILOT_MODEL_A6700 \
+        "${MODEL_FLAGS[@]}" \
         "${INC_FLAGS[@]}" \
         -I "$ROOT/patch" -I "$ROOT/modules/menu_ui" -I "$MODULE_DIR" \
         -c "$MODULE_DIR/$src" -o "$obj"
@@ -114,7 +126,7 @@ if grep -q '(TEXTREL)' <<<"$ELF_DYNAMIC"; then
     echo "text relocation found in $OUT" >&2
     exit 1
 fi
-for symbol in pilot_module_init pilot_module_model_a6700 pilot_canvas_probe_v1; do
+for symbol in pilot_module_init "$MODEL_SYMBOL"; do
     grep -qF "$symbol" <<<"$ELF_DYNSYMS"
 done
 
@@ -124,7 +136,7 @@ done
 # redirections (glibc >= 2.38 headers) and no GLIBC_x.y above 2.25.
 if grep -q '__isoc23_' <<<"$ELF_DYNSYMS"; then
     echo "$OUT references __isoc23_* symbols: built against glibc 2.38+ headers," >&2
-    echo "not the camera sysroot. Set PILOT_SYSROOT to an A6700 sysroot." >&2
+    echo "not the camera sysroot. Set PILOT_SYSROOT to a camera sysroot." >&2
     exit 1
 fi
 MAX_GLIBC="$(readelf -VW "$OUT" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -uV | tail -1)"
@@ -134,7 +146,7 @@ if [ -n "$MAX_GLIBC" ]; then
     if [ "$GLIBC_MAJOR" -gt 2 ] ||
        { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -gt 25 ]; }; then
         echo "$OUT requires GLIBC_$MAX_GLIBC but the camera provides glibc 2.25." >&2
-        echo "Set PILOT_SYSROOT to an A6700 sysroot, not a desktop cross sysroot." >&2
+        echo "Set PILOT_SYSROOT to a camera sysroot, not a desktop cross sysroot." >&2
         exit 1
     fi
 fi
