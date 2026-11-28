@@ -197,3 +197,49 @@ presenter 创建的 widget 上），那是下一步的独立工作量。
   列表行的"值"字段，不做独立详情页，最贴合 A7C II 原生交互。
 
 两条都要实机才能确认，且路线 D 的成本明显更低。
+
+## 实机日志：view_string hook 崩溃与修复
+
+A7C II 模拟器上首个菜单绘制即触发 SEGV，崩溃点落在本模块 mmap 的 trampoline 上：
+
+```
+SEGV (PC=0x7e5552b008)
+DABT at 0xff00a3bf, ESV 0x92000005
+r0 = 0x00000000ff00a1bb
+maps: 0x7e5552b000-0x7e5552c000 rwx   (4 KiB 匿名页 = trampoline)
+```
+
+`PC` 正好是 trampoline + 8，即搬迁过来的第三条指令 `ldrb w1, [x0, #0x204]`；
+`0xff00a1bb + 0x204 = 0xff00a3bf` 与 DABT 地址吻合，说明 `x0` 是垃圾值。
+
+根因：入口 stub 用 `bl a7c2_view_string_fixup` 调用 C 函数，但 **没有保存 x0**。
+`x0` 是 caller-saved，而 fixup 会把 `x0` 当临时寄存器复用（反汇编里可见
+`mov x0, #0xfffffffff000` 之类的常量装载），返回后 `x0` 已不是 view 指针，
+trampoline 第一条访存指令立刻踩空。
+
+修复：
+
+- stub 改为 `stp x29,x30,[sp,#-32]!` + `stp x0,x1,[sp,#16]`，调用后再
+  `ldp x0,x1` 恢复，保证进入搬迁序言时寄存器状态与原函数一致；
+- fixup 增加指针合法性检查（`< 0x1000` 或 `>= 2^48` 直接忽略并只记一次日志），
+  避免异常调用点把整机带走；
+- GOT hook 里的 `setString(const char*)` 入口改为首次解析后缓存，不再每次
+  `dlsym`。
+
+修复后产物 71,392 B（sha256 `fe5eec28…`），入口 stub 反汇编：
+
+```
+ae0: stp x29, x30, [sp, #-32]!
+ae4: mov x29, sp
+ae8: stp x0, x1, [sp, #16]
+aec: bl  1c00 <a7c2_view_string_fixup>
+af0: ldp x0, x1, [sp, #16]
+af4: ldp x29, x30, [sp], #32
+af8: adrp x16, 20000
+afc: ldr x16, [x16, #3912]
+b00: br  x16
+```
+
+教训：任何从手写汇编进入 C 再回到“继续执行被搬迁指令”的钩子，都必须把
+后续指令会读取的寄存器原样恢复；`x0-x7`、`x16/x17` 都是 caller-saved，
+不能假设 C 函数会保留。

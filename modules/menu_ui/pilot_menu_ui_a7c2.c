@@ -212,6 +212,8 @@ static const char *rid_text_get(uint32_t rid)
 typedef void *(*set_string_rid_fn)(void *self, uint32_t rid);
 typedef void *(*set_string_cstr_fn)(void *self, const char *text);
 
+static set_string_cstr_fn g_set_string_cstr;
+
 static void *pilot_set_string_rid_hook(void *self, uint32_t rid)
 {
     set_string_rid_fn orig = (set_string_rid_fn)g_orig_set_string_rid;
@@ -224,11 +226,11 @@ static void *pilot_set_string_rid_hook(void *self, uint32_t rid)
         const char *text = rid_text_get(rid);
 
         if (text) {
-            set_string_cstr_fn cstr = (set_string_cstr_fn)dlsym(
-                RTLD_DEFAULT, "_ZN2ux6gfxeng10TextSprite9setStringEPKc");
-
-            if (cstr)
-                return cstr(self, text);
+            if (!g_set_string_cstr)
+                g_set_string_cstr = (set_string_cstr_fn)dlsym(
+                    RTLD_DEFAULT, "_ZN2ux6gfxeng10TextSprite9setStringEPKc");
+            if (g_set_string_cstr)
+                return g_set_string_cstr(self, text);
         }
     }
     return orig(self, rid);
@@ -270,14 +272,23 @@ static int install_set_string_hook(void)
  */
 
 __attribute__((visibility("hidden"))) void *g_a7c2_vs_trampoline;
+static unsigned int g_a7c2_vs_bad_calls;
 
 __attribute__((noinline, used)) static void a7c2_view_string_fixup(void *view)
 {
     uint32_t rid;
     const char *text;
 
-    if (!view)
+    /*
+     * A stray caller would otherwise fault on the very next access, exactly
+     * like the original prologue would; ignore anything that cannot be a
+     * user-space pointer so the camera keeps running.
+     */
+    if ((uintptr_t)view < 0x1000u || (uintptr_t)view >= (1ull << 48)) {
+        if (g_a7c2_vs_bad_calls++ == 0)
+            log_msg("view_string: unexpected view %p, ignored", view);
         return;
+    }
     rid = get_u32(view, A7C2_VS_RID_OFF);
     if (rid < PILOT_RID_MENU_LABEL ||
         rid > PILOT_RID_LIST_ITEM_BASE + PILOT_RID_LIST_ITEM_MAX)
@@ -304,10 +315,12 @@ __asm__(
     ".type   a7c2_view_string_entry, %function\n"
     ".p2align 2\n"
     "a7c2_view_string_entry:\n"
-    "  stp x29, x30, [sp, #-16]!\n"
+    "  stp x29, x30, [sp, #-32]!\n"
     "  mov x29, sp\n"
+    "  stp x0, x1, [sp, #16]\n"
     "  bl  a7c2_view_string_fixup\n"
-    "  ldp x29, x30, [sp], #16\n"
+    "  ldp x0, x1, [sp, #16]\n"
+    "  ldp x29, x30, [sp], #32\n"
     "  adrp x16, g_a7c2_vs_trampoline\n"
     "  ldr  x16, [x16, :lo12:g_a7c2_vs_trampoline]\n"
     "  br  x16\n"
