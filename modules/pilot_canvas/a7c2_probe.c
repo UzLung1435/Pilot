@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <link.h>
 #include <unistd.h>
 
 #include "../../patch/pilot.h"
@@ -34,6 +35,27 @@
 PILOT_DECLARE_MODULE_MODEL();
 
 static const PilotApi *g_api;
+
+/* appFw.so 的装载基址，用来读 .bss 里的引擎状态。 */
+static uintptr_t g_appfw_base;
+
+#define APPFW_BSS_FIRST_LAYER 0x5F66BF0ull
+
+static int find_appfw(struct dl_phdr_info *info, size_t size, void *data)
+{
+    const char *name;
+    const char *slash;
+    (void)size;
+    (void)data;
+
+    name = info->dlpi_name ? info->dlpi_name : "";
+    slash = strrchr(name, '/');
+    if (strcmp(slash ? slash + 1 : name, "appFw.so") == 0) {
+        g_appfw_base = (uintptr_t)info->dlpi_addr;
+        return 1;
+    }
+    return 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* logging: module log + kernel console                                */
@@ -96,7 +118,7 @@ static void *resolve(const char *name, int *missing)
 
 typedef uint32_t (*fn_gen_id)(const char *name);
 typedef void *(*fn_wgtsys)(void);
-typedef void *(*fn_create_layer)(const void *id);
+typedef void *(*fn_create_layer)(void *self, const void *id);
 typedef void *(*fn_widget_ctor)(void *self);
 typedef void *(*fn_widget_set_size)(void *self, float w, float h);
 typedef void *(*fn_widget_set_layer_id)(void *self, const void *id);
@@ -158,8 +180,31 @@ static void probe_create_layer(void)
         return;
     }
 
+    /* createLayer 会解引用只有 UI 起来后才存在的引擎状态，所以先等第一个
+     * 全局层出现（sub_17CCF6C 在 UI 启动时写入 .bss + 0x5F66BF0）。 */
+    if (g_appfw_base == 0u) {
+        log_msg("layer probe: appFw base unknown, skip readiness wait");
+    } else {
+        int waited = 0;
+        while (waited < 240) {
+            uint64_t first = *(volatile uint64_t *)(uintptr_t)(
+                g_appfw_base + APPFW_BSS_FIRST_LAYER);
+            if (first != 0u) {
+                log_msg("layer probe: ui ready after %d ms, first layer=%p",
+                        waited * 250, (void *)(uintptr_t)first);
+                break;
+            }
+            usleep(250000);
+            ++waited;
+        }
+        if (waited >= 240) {
+            log_msg("layer probe: ui never came up, aborting");
+            return;
+        }
+    }
+
     log_msg("layer probe: calling createLayer");
-    layer = create_layer(&id);
+    layer = create_layer(wgtsys, &id);
     log_msg("layer probe: layer=%p", layer);
 }
 
@@ -169,6 +214,9 @@ static void *worker(void *arg)
 
     log_msg("pilot canvas probe a7c2 %s %s", __DATE__, __TIME__);
     log_msg("worker start");
+
+    (void)dl_iterate_phdr(find_appfw, 0);
+    log_msg("appFw base = %p", (void *)g_appfw_base);
 
     /* Give the UI time to come up before touching the widget system. */
     sleep(8);
