@@ -110,6 +110,12 @@
 #define APPFW_MENU_GROUP_ENTRY_OFF   0x10ull
 #define APPFW_MENU_ROW_SIZE          24u
 #define APPFW_MENU_MAX_ROWS          30u
+/* Group that gets the Pilot rows appended.  Category 0 is not usable: its
+ * rows are laid out by a fixed six-iteration loop plus six dedicated widgets,
+ * so a seventh row is accepted by the data layer but never gets a view.
+ * Categories 2..7 take the generic per-row path, which draws whatever rows
+ * the group declares.  Slot 4 of category 2 is the shortest group (2 rows). */#define APPFW_MENU_APPEND_CAT        2u
+#define APPFW_MENU_APPEND_SLOT       4u
 
 /*
  * [OK] TextSprite string setters (`.got.plt`; initial values point at the

@@ -500,3 +500,46 @@ A6700 的 `pilot_install_menu_table()` 做法是「复制整表 → 改副本 �
 3. 描述符池仍由模块 `calloc`，指针写进原生表（同一进程地址空间，appFw 可直接读）。
 
 `patch_mem()` 原先有 16 字节上限（`uint8_t expected[16]`），组槽是 `0x2E0` 字节，改成按 `len` 动态分配 expected。
+## 十七、最终结论：A7 C II 无法新增自定义菜单条目（实测）
+
+三个对照实验，行内容/位置/注入方式/描述符都不变，只改行 id：
+
+| 行 id | 描述符 | 显示 | 点击 |
+| --- | --- | --- | --- |
+| `0x1F00`（自定义） | 我们的 desc | 空行 | 「此功能被禁止」 |
+| `0x1F00` | 复制原生模板 `0x5A80DB0`（`+0x14=1`、`+0x18=0x65F`） | 空行 | 「此功能被禁止」 |
+| `0x1F00` | 模板 + `+0x3A` 起 19 个区域可见性全写 1 | 空行 | 「此功能被禁止」 |
+| `0x1F00` | 原生 label RID `0x021C6639` + 目标屏 `0x2FD` | 空行 | 「此功能被禁止」 |
+| **`0x8`（真实 id）** | 模板原样 | **「影像质量设置」** | **进入影像质量页** |
+
+结论：条目的**名称与点击目标由 id 查表得到**，描述符里的 label/target 不参与。
+相关代码：`menu::util::util_instance::get_name_resid_raw_file_type(model::value_id_t)`
+= `0x01B5E140`，`switch (value_id) { … return v2 | 0x2040000; }` —— 编译进 `.text` 的
+switch，无法插入新 id。目标屏同样在 appFw 内的表/分支里。
+
+名称还是**预渲染图片**：全库 `TextSprite::setString(unsigned)`、`setString(const char*)`、
+`ResourceManager::prefetchTextImage` 各只有 **1 处**引用，全部在 `view_string::draw`
+（`0x1827F8C`）内；`prefetchTextImage` 把文本 RID 渲染成图片。自定义 RID 没有对应
+图片，所以无论描述符怎么写都是空白。
+
+**由此**：A6700 能在菜单里放 Pilot 组，是因为它有可自由定义内容的详情页
+（`0x1C3` + 集中 layout 数组 + 可替换的 `setString(RID)`）；A7 C II 的 `0x1C3` 是
+固定内容的 `dlg_rec231` 对话框，菜单项则是「真实配置项的位置」，没有可插入的空白。
+
+### 保留的代码路径
+
+菜单注入已改为 **opt-in**（`-DPILOT_A7C2_ENABLE_MENU_INJECT`），默认不写原生菜单
+表。保留的部分（在 A7 C II 上已验证可用，未来若出现可承载内容的屏仍需要）：
+
+- 菜单表定位与原地写入：`APPFW_GOT_MENU_TABLE 0x05B80EC0` → `APPFW_MENU_TABLE_OFF
+  0x051DF8C8`；`page_protection()` + `write_native()`（绕过 `memory_patch` 的 64 字节
+  上限与 `locate_appfw_range` 的 4 KiB 上限）。
+- 逐行门控 hook：`sub_1B60228`（`0x1B60228`），两个 `.data.rel.ro` 槽
+  `0x597DD90` / `0x597E940`，签名 `(void*, uint32_t *row, int mode, uint32_t *out,
+  uint32_t *seq, uint32_t *count)`；返回 1 表示认领该行，`out[0]` 是显示值、
+  `out[1]` 是序号。
+- non-setting 描述符模板 `APPFW_NONSETTING_DESC_TEMPLATE 0x5A80DB0`（0x60 字节，
+  `+0x14=1`、`+0x18=0x65F`、`+0x20=0x01BF20E0`（`return 1;`）、`+0x3A` 起 19 个 u16
+  区域可见性、`+0x70=0x05ADDC58`）。
+- `view_string::draw` inline hook（`0x1827F8C`、RID `+0x208`、cstr `+0x210`）：
+  只要某屏用 RID 渲染文本，就能把它换成我们的字符串。这条与菜单无关，仍然有效。

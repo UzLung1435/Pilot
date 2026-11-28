@@ -63,13 +63,23 @@ PILOT_MODEL=a7c2 bash modules/menu_ui/build.sh
 
 ### ILCE-7CM2 (A7C II)
 
-按“功能等价”实现：A7C II 没有 A6700 那种详情页，信息直接内联在列表行上。
+**当前不在相机菜单里提供入口。** 实测证明 A7C II 的菜单条目名称与点击目标由条目 id
+查表决定（表编译在 `appFw.so` 内），描述符里的 label 与目标屏不参与，文本又是预渲染
+图片；因此自定义条目必然是空行 + 「此功能被禁止」。证据与对照实验见
+[A7C2_PORT_STATUS.md](A7C2_PORT_STATUS.md) 与
+[a7c2_reverse_notes.md](a7c2_reverse_notes.md)。
 
-- 菜单里出现 `Pilot` 组，组内每个已装模块一行。
-- 行文本是 `模块名 [on]` / `模块名 [off]`；全局 `/pilot/disable` 或该模块目录下的
-  `disable` 文件存在时显示 `[off]`。
-- 开关目前通过这两个标记文件完成（改完需完整断电重启），状态会反映到行文本上。
-- 版本页、模块选项弹窗与 Live View 纯文本仅在 ILCE-6700 上可用。
+A7C II 后端现在只做三件不侵入原厂 UI 的事：
+
+- 读 `/pilot/modules.txt` 得到模块清单；
+- 注册模块选项（`pilot_ui_register_options_v1`）；
+- 安装 `TextSprite::setString` 与 `view_string::draw` 两个 hook，把自定义 RID
+  （`0x02FFFxxx`）换成模块持有的字符串。
+
+菜单注入是编译期选项（`-DPILOT_A7C2_ENABLE_MENU_INJECT`），默认关闭。打开后它会改
+原生菜单表，只适合继续做实验。
+
+模块开关用文件标记：全局 `/pilot/disable`，或 `/pilot/modules/<名>/disable`。
 
 ## 其他模块显示纯文本（仅 ILCE-6700）
 
@@ -94,15 +104,19 @@ return pilot_ui_clear_text();
 
 ## A7C II 说明
 
-A7C II 的菜单 UI 与 A6700 同源（索尼四代机共用一套设计），但没有 A6700 那种集中
-layout 数组，文本走单一入口 `view_string::draw`。因此 A7C II 后端采用「注入菜单组 +
-inline hook 文本入口」的方式：
+A7C II 的菜单 UI 与 A6700 同源（索尼四代机共用一套设计），但两处根本差异决定了移植
+边界：
 
-- 菜单组注入到 category 0 的空组槽（组表基址 `0x051DF8C8`，GOT `0x05B80EC0`）；
-- 行描述符的 `+0x0C` 指向 `0x2CB`（`scr7001_1004`，组内项列表屏），而不是 A6700 用的
-  `0x1C3`——在 A7C II 上 `0x1C3` 是 `dlg_rec231` 对话框；
-- 行文本经 `view_string::draw` 入口 hook 替换（RID 区间 `0x02FFFxxx` → 模块内字符串，
-  文本由模块持有，不依赖相机资源）。
+- **没有集中 layout 数组**：控件按名字创建（`i_view::create_widget(screen_id, prop,
+  count, …)` 末尾传 `"No10_Background"` 这类名字），A6700 那种「改 0x60 字节 layout 项
+  的 RID」在 A7C II 上不存在。
+- **菜单条目由 id 决定**：名称走 `menu::util::util_instance::get_name_resid_raw_file_type`
+  （`0x01B5E140` 的 switch），目标屏同样按 id 查表；文本经
+  `ResourceManager::prefetchTextImage` 预渲染成图片。描述符只提供可用性与回调。
+
+因此 A7C II 后端保留可复用的技术积木（菜单表定位与原地写入、逐行门控
+`sub_1B60228` hook、non-setting 描述符模板、`view_string::draw` 文本替换），但不向
+原厂菜单里插条目。
 
 细节与实测偏移见 [A7C2_PORT_STATUS.md](A7C2_PORT_STATUS.md) 与
 [a7c2_reverse_notes.md](a7c2_reverse_notes.md)。

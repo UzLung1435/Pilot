@@ -53,6 +53,7 @@ PILOT_DECLARE_MODULE_MODEL();
 
 #define PILOT_RID_MENU_LABEL     0x02FFFF00u
 #define PILOT_RID_LIST_ITEM_BASE 0x02FFFF20u
+#define PILOT_ROWS_MAX 16u
 #define PILOT_RID_LIST_ITEM_MAX  0x20u
 
 /* ------------------------------------------------------------------ */
@@ -62,7 +63,7 @@ PILOT_DECLARE_MODULE_MODEL();
 static const PilotApi *g_api;
 static uintptr_t g_appfw_base;
 
-#ifndef PILOT_A7C2_NO_MENU_INJECT
+#ifdef PILOT_A7C2_ENABLE_MENU_INJECT
 static uint8_t *g_desc_pool;    /* row_count * APPFW_DESC_SIZE */
 static size_t g_row_count;
 #endif
@@ -146,7 +147,7 @@ static void log_msg(const char *fmt, ...)
 
 /* Hex dump helper: the A7C II menu code walks these structures blindly, so a
  * field that is merely "wrong" shows up as a wild pointer deep inside appFw. */
-#ifndef PILOT_A7C2_NO_MENU_INJECT
+#ifdef PILOT_A7C2_ENABLE_MENU_INJECT
 static void log_hex(const char *what, const void *ptr, size_t len)
 {
     const unsigned char *p = (const unsigned char *)ptr;
@@ -159,7 +160,7 @@ static void log_hex(const char *what, const void *ptr, size_t len)
         pos += snprintf(out + pos, sizeof(out) - (size_t)pos, " %02x", p[i]);
     log_msg("%s", out);
 }
-#endif /* PILOT_A7C2_NO_MENU_INJECT */
+#endif /* PILOT_A7C2_ENABLE_MENU_INJECT */
 
 static int appfw_base_cb(struct dl_phdr_info *info, size_t size, void *data)
 {
@@ -497,6 +498,98 @@ __asm__(
     "  br  x16\n"
     ".size a7c2_view_string_entry, .-a7c2_view_string_entry\n");
 
+/*
+ * Row visibility: sub_1B60228() is the per-row gate used while the menu builds
+ * its item list.  For every row it dereferences setting_desc (+0x08) or
+ * non_setting_desc (+0x10) and calls into them; a descriptor that does not
+ * match the native layout makes it walk off into the weeds (the observed
+ * crash is a small odd value used as a "this" pointer).  Only two vtable slots
+ * point at it, so hook those slots instead of the function body: no prologue
+ * relocation, and every caller still enters through the vtable.
+ */
+#define APPFW_MENU_ITEM_FN     0x1B60228ull
+#define APPFW_MENU_ITEM_SLOT_A 0x597DD90ull
+#define APPFW_MENU_ITEM_SLOT_B 0x597E940ull
+
+static uint64_t row_u64(const void *row, size_t off)
+{
+    uint64_t value = 0;
+
+    memcpy(&value, (const uint8_t *)row + off, sizeof(value));
+    return value;
+}
+typedef int64_t (*a7c2_menu_item_fn)(void *, uint32_t *, int, uint32_t *,
+                                     uint32_t *, uint32_t *);
+
+static a7c2_menu_item_fn g_menu_item_orig;
+static unsigned int g_menu_item_calls;
+
+static int64_t a7c2_menu_item_hook(void *a1, uint32_t *row, int mode,
+                                   uint32_t *out, uint32_t *a5, uint32_t *a6)
+{
+    /*
+     * The walker hands this gate the start of a 24-byte row: {u64 id,
+     * u64 setting_desc, u64 non_setting_desc}.  The id is the low half of the
+     * first field.
+     */
+    const uint8_t *rec = (const uint8_t *)row;
+    uint32_t id = get_u32(rec, 0);
+
+    if (mode == 0 && id >= PILOT_ITEM_ID_BASE &&
+        id < PILOT_ITEM_ID_BASE + (uint32_t)PILOT_ROWS_MAX &&
+        row_u64(rec, 8) == 0u) {
+        uint32_t index = id - PILOT_ITEM_ID_BASE;
+        uint32_t rid = PILOT_RID_LIST_ITEM_BASE + index;
+
+        log_msg("pilot row accepted: id=0x%x -> rid=0x%x", (unsigned)id,
+                (unsigned)rid);
+        *out = rid;
+        if ((*a6 % 7u) == 0u) {
+            ++*a5;
+        }
+        ++*a6;
+        out[1] = *a5;
+        return 1;
+    }
+    if (mode == 0 && g_menu_item_calls < 24u) {
+        log_msg("item: id=0x%x setting=0x%llx nonset=0x%llx",
+                (unsigned)id, (unsigned long long)row_u64(rec, 8),
+                (unsigned long long)row_u64(rec, 16));
+        ++g_menu_item_calls;
+    }
+    return g_menu_item_orig(a1, row, mode, out, a5, a6);
+}
+
+__attribute__((unused)) static int install_menu_item_hook(void)
+{
+    uint64_t slot_a = 0;
+    uint64_t slot_b = 0;
+    uint64_t want = (uint64_t)(g_appfw_base + APPFW_MENU_ITEM_FN);
+    uint64_t hook = (uint64_t)(uintptr_t)&a7c2_menu_item_hook;
+
+    if (read_mem(APPFW_MENU_ITEM_SLOT_A, &slot_a, sizeof(slot_a)) != 0 ||
+        read_mem(APPFW_MENU_ITEM_SLOT_B, &slot_b, sizeof(slot_b)) != 0) {
+        log_msg("menu item slots unreadable");
+        return -1;
+    }
+    if (slot_a != want || slot_b != want) {
+        log_msg("menu item slot mismatch: 0x%llx/0x%llx want 0x%llx",
+                (unsigned long long)slot_a, (unsigned long long)slot_b,
+                (unsigned long long)want);
+        return -1;
+    }
+    g_menu_item_orig = (a7c2_menu_item_fn)(uintptr_t)want;
+    if (write_native(g_appfw_base + APPFW_MENU_ITEM_SLOT_A, &hook,
+                     sizeof(hook)) != 0 ||
+        write_native(g_appfw_base + APPFW_MENU_ITEM_SLOT_B, &hook,
+                     sizeof(hook)) != 0) {
+        log_msg("menu item hook write failed");
+        return -1;
+    }
+    log_msg("menu item hook installed, original=0x%llx",
+            (unsigned long long)want);
+    return 0;
+}
 static int install_view_string_hook(void)
 {
     static const uint32_t prologue[4] = {
@@ -573,7 +666,6 @@ static int install_view_string_hook(void)
  * its contents are still a JSON object.
  */
 
-#define PILOT_ROWS_MAX 16u
 #define PILOT_ROWS_FALLBACK 4u
 
 static char g_mod_names[PILOT_ROWS_MAX][32];
@@ -746,40 +838,88 @@ static void load_modules(void)
  * availability callback.  Everything else stays zero, which is what the
  * A6700 module does as well.
  */
-#ifndef PILOT_A7C2_NO_MENU_INJECT
+#ifdef PILOT_A7C2_ENABLE_MENU_INJECT
+/*
+ * A zero filled descriptor is rejected with "this function is prohibited", so
+ * start from a native non-setting descriptor and only override the two fields
+ * we own.  The permission words in the template stay as the firmware shipped
+ * them.
+ */
+#define APPFW_NONSETTING_DESC_TEMPLATE 0x5A80DB0ull
+
+#define APPFW_DESC_REGION_OFF          0x3Aull
+#define APPFW_DESC_REGION_COUNT        19u
+
 static void fill_desc(uint8_t *desc, uint32_t label_rid, uint32_t screen_id)
 {
+    size_t i;
+
     if (!desc)
         return;
 
-    memset(desc, 0, APPFW_DESC_SIZE);
+    if (read_mem((uintptr_t)APPFW_NONSETTING_DESC_TEMPLATE, desc,
+                 APPFW_DESC_SIZE) != 0) {
+        memset(desc, 0, APPFW_DESC_SIZE);
+    }
     put_u32(desc, APPFW_DESC_LABEL_RID_OFF, label_rid);
     put_u32(desc, APPFW_DESC_SCREEN_ID_OFF, screen_id);
+    put_u32(desc, APPFW_DESC_SCREEN_ID_OFF + 4u, screen_id);
     put_u64(desc, APPFW_DESC_VISIBILITY_OFF,
             (uint64_t)(g_appfw_base + APPFW_VISIBILITY_OK_OFF));
+    /*
+     * The per-region visibility table (u16 entries from +0x3A) is what the
+     * native "can this entry be used" test reads at click time.  The walker
+     * lets our row through because the hook answers for it, but the click
+     * path asks the real gate, so every region has to say yes.
+     */
+    for (i = 0; i < APPFW_DESC_REGION_COUNT; ++i) {
+        put_u32(desc, APPFW_DESC_REGION_OFF + (size_t)i * 2u, 1u);
+    }
 }
 
 /* ------------------------------------------------------------------ */
 /* Menu group injection                                               */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Never touch the category group count.  sub_1B5AC70() walks count groups and
+ * indexes a caller supplied buffer as a3[7570 + group] / a3[946 * group + ...];
+ * one extra group runs off the end of that buffer and the menu crashes on the
+ * next key press.  Appending rows to an existing group only feeds the per-group
+ * walker, so it stays inside the native allocation.
+ */
+/*
+ * Append one group to category 0 by writing the native table in place.  The
+ * category count is the one field the native walker trusts, so the new group
+ * is fully written first and only then does the count go from N to N+1.
+ *
+ * A redirected GOT copy is not enough here: five call sites reach the table
+ * through adrp/add on the literal address and only one goes through the GOT,
+ * so a private copy leaves the rest of the UI reading the untouched original.
+ */
+/*
+ * Never grow the category count.  The native walker in sub_1B5AC70() treats
+ * the count as authoritative for several parallel arrays, and four other
+ * functions reach the table through adrp/add on the literal address, so a
+ * count bump makes half the UI read a group the other half never sized for.
+ * Rows, on the other hand, are walked one at a time, so appending rows to the
+ * existing category-0 slot 0 keeps every reader consistent.
+ *
+ * The appended rows carry setting_desc = 0, which normally makes the per-row
+ * gate bail out; a7c2_menu_item_hook() recognises their ids and answers for
+ * them before that gate runs.
+ */
 static int install_menu_group(void)
 {
     uintptr_t got = 0;
-    uintptr_t cat0;
     uintptr_t group;
-    uint8_t old_group[APPFW_MENU_GROUP_SIZE];
-    uint8_t new_group[APPFW_MENU_GROUP_SIZE];
-    uint8_t zero[APPFW_MENU_GROUP_SIZE];
-    uint32_t cat_count;
-    size_t i;
+    uint8_t old_buf[APPFW_MENU_GROUP_SIZE];
+    uint8_t new_buf[APPFW_MENU_GROUP_SIZE];
+    uint32_t rows = 0;
+    uint32_t spare[APPFW_MENU_MAX_ROWS];
+    uint32_t spare_count = 0;
+    uint32_t i;
 
-    /*
-     * The GOT slot is only one of six references to the group table; five
-     * code sites load APPFW_MENU_TABLE_OFF directly.  Redirecting the GOT
-     * leaves the menu split across two tables, so patch the native table in
-     * place and let every reader see the same bytes.
-     */
     if (read_mem(APPFW_GOT_MENU_TABLE, &got, sizeof(got)) != 0) {
         log_msg("menu table GOT unreadable");
         return -1;
@@ -790,85 +930,96 @@ static int install_menu_group(void)
         return -1;
     }
 
-    cat0 = (uintptr_t)APPFW_MENU_CAT_BASE_OFF;
-    if (read_mem(cat0 + (uintptr_t)APPFW_MENU_CAT_COUNT_OFF, &cat_count,
-                 sizeof(cat_count)) != 0) {
-        log_msg("category 0 count unreadable");
+    /*
+     * "My Menu" (category 0) is the only page the native code renders through
+     * a fixed six-widget loop, so its row count must stay untouched.  Empty
+     * rows there are placeholders nobody fills in, which makes them the safest
+     * landing spot: swapping a placeholder keeps both the row count and the
+     * widget count intact.
+     */
+    group = (uintptr_t)APPFW_MENU_TABLE_OFF +
+            (uintptr_t)APPFW_MENU_CAT_BASE_OFF +
+            (uintptr_t)APPFW_MENU_CAT_GROUP_OFF;
+    if (read_mem(group, old_buf, sizeof(old_buf)) != 0) {
+        log_msg("group unreadable at +0x%x", (unsigned)group);
         return -1;
     }
-    log_msg("native menu table %p, cat0 count=%u", (void *)got,
-            (unsigned)cat_count);
-    if (cat_count >= APPFW_MENU_CAT_GROUPS) {
-        log_msg("category 0 is full (count=%u)", (unsigned)cat_count);
+    rows = get_u32(old_buf, APPFW_MENU_GROUP_ROWS_OFF);
+    log_msg("cat0 slot0: rows=%u rid=0x%x index=0x%x", (unsigned)rows,
+            (unsigned)get_u32(old_buf, APPFW_MENU_GROUP_RID_OFF),
+            (unsigned)get_u32(old_buf, APPFW_MENU_GROUP_INDEX_OFF));
+    if (rows > APPFW_MENU_MAX_ROWS) {
+        log_msg("group looks wrong: rows=%u (offset bug?)", (unsigned)rows);
         return -1;
     }
 
-    group = cat0 + (uintptr_t)APPFW_MENU_CAT_GROUP_OFF +
-            (size_t)cat_count * APPFW_MENU_GROUP_SIZE;
-    memset(zero, 0, sizeof(zero));
-    if (read_mem(group, old_group, sizeof(old_group)) != 0) {
-        log_msg("group slot %u unreadable", (unsigned)cat_count);
-        return -1;
+    for (i = 0; i < rows; ++i) {
+        size_t off = APPFW_MENU_GROUP_ENTRY_OFF +
+                     (size_t)i * APPFW_MENU_ROW_SIZE;
+
+        if (get_u32(old_buf, off) == 0u && row_u64(old_buf, off + 8u) == 0u) {
+            spare[spare_count++] = i;
+        }
     }
-    if (memcmp(old_group, zero, sizeof(zero)) != 0) {
-        log_msg("group slot %u is not empty, refusing to overwrite",
-                (unsigned)cat_count);
-        log_hex("slot-head", old_group, 32);
-        return -1;
-    }
+    log_msg("cat0 slot0 spare rows: %u", (unsigned)spare_count);
 
     g_row_count = g_mod_count ? g_mod_count : PILOT_ROWS_FALLBACK;
+    if (spare_count == 0u && rows > 0u) {
+        /*
+         * "My Menu" is full: take over its last entry instead of giving up.
+         * One default shortcut is lost, but the row count and the widget count
+         * both stay intact, which is what keeps the native page stable.
+         */
+        log_msg("cat0 slot0 is full, taking over the last entry");
+        spare[spare_count++] = rows - 1u;
+    }
+    if (g_row_count > spare_count) {
+        if (spare_count == 0u) {
+            log_msg("no usable row in cat0 slot0, giving up");
+            return -1;
+        }
+        log_msg("clamping %u rows to %u slot(s)", (unsigned)g_row_count,
+                (unsigned)spare_count);
+        g_row_count = spare_count;
+    }
     g_desc_pool = calloc(g_row_count, APPFW_DESC_SIZE);
     if (!g_desc_pool) {
         log_msg("descriptor pool allocation failed");
         return -1;
     }
 
-    memset(new_group, 0, sizeof(new_group));
-    put_u32(new_group, APPFW_MENU_GROUP_INDEX_OFF, PILOT_GROUP_INDEX_FREE);
-    put_u32(new_group, APPFW_MENU_GROUP_RID_OFF, PILOT_RID_MENU_LABEL);
-    put_u32(new_group, APPFW_MENU_GROUP_ROWS_OFF, (uint32_t)g_row_count);
+    memcpy(new_buf, old_buf, sizeof(new_buf));
+    if (get_u32(new_buf, APPFW_MENU_GROUP_RID_OFF) == 0u) {
+        put_u32(new_buf, APPFW_MENU_GROUP_RID_OFF, PILOT_RID_MENU_LABEL);
+    }
+    if (get_u32(new_buf, APPFW_MENU_GROUP_INDEX_OFF) == 0u) {
+        put_u32(new_buf, APPFW_MENU_GROUP_INDEX_OFF, 0x41u);
+    }
+    for (i = 0; i < (uint32_t)g_row_count; ++i) {
+        uint8_t *desc = g_desc_pool + (size_t)i * APPFW_DESC_SIZE;
+        size_t row_off = APPFW_MENU_GROUP_ENTRY_OFF +
+                         (size_t)spare[i] * APPFW_MENU_ROW_SIZE;
 
-    for (i = 0; i < g_row_count; ++i) {
-        uint8_t *desc = g_desc_pool + i * APPFW_DESC_SIZE;
-        size_t row_off = APPFW_MENU_GROUP_ENTRY_OFF + i * APPFW_MENU_ROW_SIZE;
-
-        fill_desc(desc, PILOT_RID_LIST_ITEM_BASE + (uint32_t)i,
-                  APPFW_ITEM_SCREEN_ID);
-        put_u64(new_group, row_off + 0u, PILOT_ITEM_ID_BASE + i);
-        put_u64(new_group, row_off + 8u, 0);            /* setting_desc     */
-        put_u64(new_group, row_off + 16u, (uint64_t)(uintptr_t)desc);
+        fill_desc(desc, PILOT_RID_LIST_ITEM_BASE + i, APPFW_ITEM_SCREEN_ID);
+        put_u64(new_buf, row_off + 0u, PILOT_ITEM_ID_BASE + i);
+        put_u64(new_buf, row_off + 8u, 0);              /* setting_desc     */
+        put_u64(new_buf, row_off + 16u, (uint64_t)(uintptr_t)desc);
     }
 
-    log_hex("group", new_group, 48);
-    log_hex("row0", new_group + APPFW_MENU_GROUP_ENTRY_OFF, 24);
+    log_hex("old-group", old_buf, 48);
+    log_hex("new-group", new_buf, 48);
     log_hex("desc0", g_desc_pool, 48);
 
-    if (patch_mem(group, new_group, sizeof(new_group)) != 0) {
-        log_msg("group slot patch failed at +0x%x", (unsigned)group);
+    if (patch_mem(group, new_buf, sizeof(new_buf)) != 0) {
+        log_msg("group patch failed at +0x%x", (unsigned)group);
         return -1;
     }
 
-#ifndef PILOT_A7C2_NO_COUNT_BUMP
-    {
-        uint32_t bumped = cat_count + 1u;
-
-        if (patch_mem(cat0 + (uintptr_t)APPFW_MENU_CAT_COUNT_OFF, &bumped,
-                      sizeof(bumped)) != 0) {
-            log_msg("category 0 count patch failed");
-            return -1;
-        }
-        log_msg("cat0 count -> %u", (unsigned)bumped);
-    }
-#else
-    log_msg("count bump disabled at build time (diagnostic)");
-#endif
-
-    log_msg("group injected into native table: category 0 slot %u, %u rows",
-            (unsigned)cat_count, (unsigned)g_row_count);
+    log_msg("filled %u spare row(s) in cat0 slot0, rows stays %u",
+            (unsigned)g_row_count, (unsigned)rows);
     return 0;
 }
-#endif /* PILOT_A7C2_NO_MENU_INJECT */
+#endif /* PILOT_A7C2_ENABLE_MENU_INJECT */
 
 /* ------------------------------------------------------------------ */
 /* Pilot option pages                                                 */
@@ -950,14 +1101,18 @@ static void *worker(void *arg)
 
     load_modules();
     log_msg("manifest: %u module(s)", (unsigned)g_mod_count);
-#ifdef PILOT_A7C2_NO_MENU_INJECT
-    /* Diagnostic build: load, enumerate and register options, but leave the
-     * native menu table alone.  Used to tell an appFw-side fault apart from
-     * something this module wrote into the table. */
-    log_msg("menu injection disabled at build time");
-#else
+    /*
+     * Menu injection is opt-in.  The A7C II menu derives an entry's name and
+     * click target from its id (looked up in tables compiled into appFw), so a
+     * row with our own id renders blank and refuses to open.  Verified on
+     * hardware: cloning a native id shows that entry's name and opens its page.
+     */
+#ifdef PILOT_A7C2_ENABLE_MENU_INJECT
     if (install_menu_group() != 0)
         log_msg("menu group NOT installed");
+    (void)install_menu_item_hook();
+#else
+    log_msg("menu injection disabled (A7C II derives entry name/target from id)");
 #endif
     seed_texts();
     if (install_set_string_hook() != 0)

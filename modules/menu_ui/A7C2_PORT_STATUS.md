@@ -384,3 +384,29 @@ qemu 上按 Menu 键时 appFw 在 `sub_1B765B0` 崩（`a1 = 0xb2e1`、`idx = 9`�
 第一版 `console_emit()` 缓存了 `/dev/kmsg` 的描述符，前 8 行正常、之后全部丢失
 （只剩 `FSYS_FILE_TRACE op=Open` 的痕迹）—— 框架会关闭或复用不属于自己的描述符。
 现在每行重新 `open`/`write`/`close`，单条消息最多 320 字节缓冲区，代价可以忽略。
+## 最终结论（2026-11-28）：菜单项路线停止
+
+实测证明 A7 C II 的菜单条目名称与点击目标由**条目 id** 查表决定，描述符里的
+label/target 不参与；文本又是预渲染图片。把行 id 换成真实项 `0x8` 立刻显示
+「影像质量设置」并能进入其页面，换回自定义 id 就是空行 + 「此功能被禁止」。
+完整证据见 `a7c2_reverse_notes.md` 第十七节。
+
+因此**在 A7 C II 菜单里放 Pilot 入口这件事不可行**，与实现细节无关。
+
+### 当前状态
+
+- 菜单注入改为 opt-in（`-DPILOT_A7C2_ENABLE_MENU_INJECT`），**默认关闭**，默认产物
+  不写原生菜单表。
+- 默认产物保留三件事：读 `modules.txt` 得到模块清单、注册两个选项
+  （`pilot_ui_register_options_v1`）、装 `setString` 与 `view_string` 两个 hook。
+- 产物 `Pilot/build/MNUI.so`：71,672 B，sha256
+  `6f760319787058512723166db420cc19c2531bed3dbb699ffbec02f54823de94`，
+  `glibc <= GLIBC_2.17`。A6700 变体仍为 79,456 B / `0cf89a76…`，未受影响。
+- 构建：`PILOT_MODEL=a7c2 bash modules/menu_ui/build.sh <out>`
+  （opt-in 版加 `PILOT_EXTRA_CFLAGS=-DPILOT_A7C2_ENABLE_MENU_INJECT`）。
+
+### 保留的知识
+
+注入机制、逐行门控 hook、non-setting 描述符模板、`view_string::draw` 的文本替换
+能力都已跑通并保留在代码里。若将来在 A7 C II 上找到可承载自定义内容的屏，这些是
+现成的积木。
