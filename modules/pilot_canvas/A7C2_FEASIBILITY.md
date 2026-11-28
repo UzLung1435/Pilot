@@ -127,3 +127,30 @@ FSYS_FILE_TRACE op=Open path=A:/pilot/MNUI.so handle=81 flags=0x1 result=0
 | `pilot_canvas_probe.so` | 18 + 3 | 不可以 |
 
 A6700 上没有暴露这个问题，因为那边一直是把模块编成 `pilot_menu_ui.so` / `pilot_canvas.so` 并放到 `/pilot/`，`modules.txt` 也按长名引用 —— 这要么说明 A6700 的 Fsys 支持 LFN，要么说明那份部署从来没有真正走通，值得单独确认。
+## modules.txt 的两个硬约束
+
+把探针改成 `CPROBE.SO` 之后，卡上文件确实在（`mdir` 可见，68,568 字节），但 run-jt67d2mb 里模块依然没被加载 —— 这次更彻底，连 `MNUI.so` 都没打开：
+
+```
+FSYS_FILE_TRACE op=Open path=A:/pilot/modules.txt handle=41 flags=0x1 result=0
+FSYS_FILE_TRACE op=Open path=A:/pilot/log.txt     handle=61 flags=0x2 result=0
+```
+
+`modules.txt` 打开成功，之后没有任何 `.so` 的 Open 行，说明清单解析失败、整体被丢弃。
+
+根因在 `patch/pilot_modules.c` 的 `parse_modules_json()`（L42-98）：
+
+- 第一个字符必须是 `{`，**前面不允许空白或换行**（L50 `json_expect(&json, '{')` 前没有 `json_skip_space`）
+- 键名必须恰是 `"modules"`（逐字节比对，L54-57）
+- 元素字符只允许 `[A-Za-z0-9_.-]`（L69-72），不允许空格、斜杠
+- **必须以小写 `.so` 结尾**（L78 `strcmp(names[count] + name_length - 3, ".so") != 0`）—— `CPROBE.SO` 就是死在这一条
+- 不能以 `.` 开头、不能含 `..`（L79）
+- 结尾必须是 `]}`，之后只允许空白，所以尾随换行没问题（L93-95）
+
+`module_data_name()`（L100-110）和 `valid_filename()`（L112-127）里也有同样的 `.so` 判断，所以这条规则贯穿整个模块层。
+
+**正确写法**（FAT 大小写不敏感，卡上的文件仍显示 `CPROBE.SO`）：
+
+```json
+{"modules": ["MNUI.so", "CPROBE.so"]}
+```
