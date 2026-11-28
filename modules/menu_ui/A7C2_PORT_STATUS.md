@@ -285,3 +285,44 @@ open('a7c2_menu_table_head.bin','wb').write(get_bytes(0x051DF8C8, 0x3000))
 注入的组落在**第一个菜单分类**（cat0，标题 RID `0x02006451`）的最后一个位置；
 组名 RID `0x02FFFF00` 在相机资源里不存在，靠 `setString` / `view_string` 钩子
 替换成 "Pilot"，若看不到组名只剩空行，说明钩子没生效。
+
+## 实机日志（第二轮）：menu table copy failed
+
+换上新构建后 `MODULE.LOG` 给出了真正的第一层原因：
+
+```
+1970-01-01T00:00:28Z appFw base = 0x7f67f74000
+1970-01-01T00:00:28Z menu table copy failed
+1970-01-01T00:00:28Z menu group NOT installed
+1970-01-01T00:00:28Z setString hook installed, original=0x7f96134944
+1970-01-01T00:00:28Z view_string hook at 0x7f6979bf8c
+```
+
+`appFw base + 0x1827F8C` 正好等于 `0x7f6979bf8c`，钩子地址无误；失败的是菜单表
+整表读取。原因是 Pilot API 的读接口有单页上限 ——
+`patch/pilot_memory.c` 的 `locate_appfw_range()` 第一句就是
+
+```c
+if (!address || !length || length > 4096 || address > UINTPTR_MAX - length)
+    return 0;
+```
+
+而 A7C2 的菜单表是 `0x15480` 字节，一次读完必然返回 `PILOT_STATUS_RANGE`。
+上一提交修掉的 category 偏移错误是第二层问题：副本读不出来，就根本没走到
+那一步校验。
+
+修法是把 `read_mem()` 改成按 4 KiB 分块，所有调用点自动受益：
+
+```c
+while (done < len) {
+    size_t chunk = len - done;
+    if (chunk > 4096u) chunk = 4096u;
+    if (g_api->memory_read(g_appfw_base + off + done,
+                           (uint8_t *)dst + done, chunk) != PILOT_STATUS_OK)
+        return -1;
+    done += chunk;
+}
+```
+
+修好后的产物 71,424 B，sha256
+`a802b893ab23d6d3b50d0699af09378fe1a83b2d94551a5a63fd2a7e3a2bdf72`。

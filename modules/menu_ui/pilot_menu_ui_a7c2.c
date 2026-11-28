@@ -115,11 +115,27 @@ static int appfw_base_cb(struct dl_phdr_info *info, size_t size, void *data)
 
 static int read_mem(uintptr_t off, void *dst, size_t len)
 {
+    size_t done = 0;
+
     if (!g_api || !g_api->memory_read || !g_appfw_base)
         return -1;
-    return g_api->memory_read(g_appfw_base + off, dst, len) == PILOT_STATUS_OK
-               ? 0
-               : -1;
+    /*
+     * pilot_memory_read_impl() rejects any request longer than one page
+     * (locate_appfw_range(): "length > 4096"), and the menu table is
+     * 0x15480 bytes, so walk it in page sized chunks.
+     */
+    while (done < len) {
+        size_t chunk = len - done;
+
+        if (chunk > 4096u)
+            chunk = 4096u;
+        if (g_api->memory_read(g_appfw_base + off + done,
+                               (uint8_t *)dst + done, chunk) !=
+            PILOT_STATUS_OK)
+            return -1;
+        done += chunk;
+    }
+    return 0;
 }
 
 static int patch_mem(uintptr_t off, const void *src, size_t len)
