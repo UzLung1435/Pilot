@@ -213,12 +213,215 @@ static void host_draw(PilotCanvas *c, int tick)
     pilot_canvas_commit_v1(c);
 }
 
+/* The CP patch only proves a *write* channel; reading CP RAM goes through
+   /dev/pcidma and needs nothing from the CP side.  What is missing on A7 C II
+   is the OPD table address (A6700: 0x015B6398, stride 0x70).  Probe a few
+   candidates here so the log says whether pcidma works at all and whether the
+   A6700 address happens to be valid on this firmware. */
+static void host_probe_cp(void)
+{
+    static const uint64_t k_addrs[] = {
+        0x015B6398ull,             /* A6700 OPD table base */
+        0x015B6398ull + 0x70ull,
+        0x015B6398ull + 0xE0ull,
+        0x015B6398ull + 0x150ull,
+        0x017A0000ull,
+        0x01900000ull,
+    };
+    unsigned char buf[0x70];
+    unsigned int i;
+
+    if (g_api == NULL || g_api->cp_mem == NULL || g_api->cp_mem->read == NULL) {
+        hlog("HOST a7c2: cp_mem read unavailable");
+        return;
+    }
+    for (i = 0; i < (unsigned int)(sizeof(k_addrs) / sizeof(k_addrs[0])); ++i) {
+        PilotStatus st;
+
+        memset(buf, 0, sizeof(buf));
+        st = g_api->cp_mem->read(k_addrs[i], buf, sizeof(buf));
+        if (st != PILOT_STATUS_OK) {
+            hlog("HOST a7c2: cp read %#llx -> %d",
+                 (unsigned long long)k_addrs[i], (int)st);
+            continue;
+        }
+        hlog("HOST a7c2: cp read %#llx ok %02x %02x %02x %02x %02x %02x %02x %02x",
+             (unsigned long long)k_addrs[i], buf[0], buf[1], buf[2], buf[3],
+             buf[4], buf[5], buf[6], buf[7]);
+    }
+}
+
+/* ---- touch drag ------------------------------------------------------- */
+
+/* postMousePress/Move/Release are WidgetSystem methods; their GOT slots hold
+   the libObj.so entry points, so replacing the slot intercepts every caller
+   (the input pump included).  Press carries no coordinates: the last move
+   event before it does, exactly like A6700's panel code assumes. */
+#define APPFW_GOT_POST_MOUSE_MOVE    0x05BC21F8ull
+#define APPFW_GOT_POST_MOUSE_PRESS   0x05BC2AC8ull
+#define APPFW_GOT_POST_MOUSE_RELEASE 0x05BC20B8ull
+
+typedef void (*fn_mouse_move)(void *self, uint8_t finger, int16_t x, int16_t y,
+                              const void *msec);
+typedef void (*fn_mouse_btn)(void *self, uint8_t finger, uint8_t btn,
+                             const void *msec);
+typedef void (*fn_set_local_pos)(void *self, const void *vector2);
+
+static fn_mouse_move g_orig_mouse_move;
+static fn_mouse_btn g_orig_mouse_press;
+static fn_mouse_btn g_orig_mouse_release;
+static fn_set_local_pos g_widget_set_local_pos;
+
+static int g_touch_has_pos;
+static int g_touch_x;
+static int g_touch_y;
+static int g_drag_active;
+static int g_drag_dx;
+static int g_drag_dy;
+static int g_widget_x;
+static int g_widget_y;
+
+static int host_read_mem(uintptr_t addr, void *dst, size_t len)
+{
+    if (g_api == NULL || g_api->memory_read == NULL)
+        return -1;
+    return (g_api->memory_read(addr, dst, len) == PILOT_STATUS_OK) ? 0 : -1;
+}
+
+static int host_patch_mem(uintptr_t addr, const void *src, size_t len)
+{
+    unsigned char old[64];
+
+    if (g_api == NULL || g_api->memory_patch == NULL || len > sizeof(old))
+        return -1;
+    if (host_read_mem(addr, old, len) != 0)
+        return -1;
+    return (g_api->memory_patch(addr, old, src, len) == PILOT_STATUS_OK) ? 0 : -1;
+}
+
+static void host_place_widget(int x, int y)
+{
+    struct {
+        float x;
+        float y;
+    } v;
+
+    if (g_widget_set_local_pos == NULL)
+        return;
+    v.x = (float)x;
+    v.y = (float)y;
+    g_widget_set_local_pos((void *)g_host_widget, &v);
+}
+
+static void host_mouse_move(void *self, uint8_t finger, int16_t x, int16_t y,
+                            const void *msec)
+{
+    g_touch_has_pos = 1;
+    g_touch_x = (int)x;
+    g_touch_y = (int)y;
+    if (g_drag_active) {
+        int nx = g_touch_x - g_drag_dx;
+        int ny = g_touch_y - g_drag_dy;
+
+        if (nx != g_widget_x || ny != g_widget_y) {
+            g_widget_x = nx;
+            g_widget_y = ny;
+            host_place_widget(nx, ny);
+        }
+        return; /* the drag owns this finger */
+    }
+    if (g_orig_mouse_move)
+        g_orig_mouse_move(self, finger, x, y, msec);
+}
+
+static void host_mouse_press(void *self, uint8_t finger, uint8_t btn,
+                             const void *msec)
+{
+    if (g_touch_has_pos && g_widget_set_local_pos != NULL &&
+        g_touch_x >= g_widget_x && g_touch_x < g_widget_x + HOST_W &&
+        g_touch_y >= g_widget_y && g_touch_y < g_widget_y + HOST_H) {
+        g_drag_active = 1;
+        g_drag_dx = g_touch_x - g_widget_x;
+        g_drag_dy = g_touch_y - g_widget_y;
+        hlog("HOST a7c2: drag start %d,%d (widget %d,%d)",
+             g_touch_x, g_touch_y, g_widget_x, g_widget_y);
+        return;
+    }
+    if (g_orig_mouse_press)
+        g_orig_mouse_press(self, finger, btn, msec);
+}
+
+static void host_mouse_release(void *self, uint8_t finger, uint8_t btn,
+                               const void *msec)
+{
+    if (g_drag_active) {
+        g_drag_active = 0;
+        hlog("HOST a7c2: drag end %d,%d (widget %d,%d)",
+             g_touch_x, g_touch_y, g_widget_x, g_widget_y);
+        return;
+    }
+    if (g_orig_mouse_release)
+        g_orig_mouse_release(self, finger, btn, msec);
+}
+
+static int host_hook_got(uintptr_t offset, void *hook)
+{
+    uintptr_t slot = g_host_base + offset;
+    void *replacement = hook;
+
+    if (host_patch_mem(slot, &replacement, sizeof(replacement)) != 0) {
+        hlog("HOST a7c2: got patch %#llx failed", (unsigned long long)slot);
+        return 0;
+    }
+    return 1;
+}
+
+static void host_install_touch_hook(void)
+{
+    union { void *p; fn_mouse_move f; } u_move;
+    union { void *p; fn_mouse_btn f; } u_press;
+    union { void *p; fn_mouse_btn f; } u_rel;
+    union { void *p; fn_set_local_pos f; } u_pos;
+    int ok = 0;
+
+    /* The GOT slot holds the import stub, not the implementation, so chaining
+       through its old value would jump into an unrelocated slot.  dlsym gives
+       the real libObj.so entry point -- same approach as canvas_panel.c. */
+    u_move.p = dlsym(RTLD_DEFAULT,
+                     "_ZN2ux6wgtsys12WidgetSystem13postMouseMoveEhssNS_4core8MsecTimeE");
+    u_press.p = dlsym(RTLD_DEFAULT,
+                      "_ZN2ux6wgtsys12WidgetSystem14postMousePressEhhNS_4core8MsecTimeE");
+    u_rel.p = dlsym(RTLD_DEFAULT,
+                    "_ZN2ux6wgtsys12WidgetSystem16postMouseReleaseEhhNS_4core8MsecTimeE");
+    /* Name length is 11 ("setLocalPos"), the 12 form does not resolve. */
+    u_pos.p = dlsym(RTLD_DEFAULT,
+                    "_ZN2ux6wgtsys6Widget11setLocalPosERKNS_4core7Vector2E");
+
+    if (u_move.p == NULL || u_press.p == NULL || u_rel.p == NULL) {
+        hlog("HOST a7c2: touch symbols missing move=%p press=%p rel=%p",
+             u_move.p, u_press.p, u_rel.p);
+        return;
+    }
+    g_orig_mouse_move = u_move.f;
+    g_orig_mouse_press = u_press.f;
+    g_orig_mouse_release = u_rel.f;
+    g_widget_set_local_pos = u_pos.f;
+
+    ok += host_hook_got(APPFW_GOT_POST_MOUSE_MOVE, (void *)host_mouse_move);
+    ok += host_hook_got(APPFW_GOT_POST_MOUSE_PRESS, (void *)host_mouse_press);
+    ok += host_hook_got(APPFW_GOT_POST_MOUSE_RELEASE, (void *)host_mouse_release);
+
+    hlog("HOST a7c2: touch hook %d/3, setLocalPos=%p", ok,
+         (void *)g_widget_set_local_pos);
+}
+
 void pilot_canvas_a7c2_host_run(void)
 {
     PilotCanvas *c;
     int tick = 0;
 
     hlog("HOST a7c2: start");
+    host_probe_cp();
 
     if (!host_wait_ui())
         return;
@@ -226,6 +429,7 @@ void pilot_canvas_a7c2_host_run(void)
         return;
     if (!host_create_widget())
         return;
+    host_install_touch_hook();
 
     c = pilot_canvas_create_v1(HOST_W, HOST_H, PILOT_CANVAS_BACKEND_RECT);
     if (c == NULL) {

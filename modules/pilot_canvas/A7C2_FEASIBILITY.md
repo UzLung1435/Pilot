@@ -308,3 +308,13 @@ PILOT_CP_UIPC_STAT_VA 0x00C12FA0
 数据从哪来：`pilot_canvas_*_v1` 已导出（`create`/`bind_widget`/`clear`/
 `fill_rect`/`line`/`blit`/`draw_grid`/`draw_osd_text`/`chart`/`commit`），
 其他模块可以 `dlsym` 拿到后自己往画布里推数据。
+## 触摸拖动（已实测）
+
+`postMousePress/Move/Release` 的 GOT 槽（`0x05BC2AC8` / `0x05BC21F8` / `0x05BC20B8`）换成模块自己的函数：`press` 落在画布矩形内时吞掉该手指，`move` 用 `Widget::setLocalPos` 移动整个 widget，`release` 收尾。`press` 本身不带坐标，用最近一次 `move` 的位置做命中测试（A6700 的 panel 代码也是这个前提）。
+
+两个必须记住的点：
+
+- **`orig` 必须来自 `dlsym(RTLD_DEFAULT, ...)`**，不能取 GOT 槽的旧值 —— 槽里是 PLT 导入桩（指向 `extern` 段的 `__imp_*`），转发到它会让链接器在初始化完成后再去解析，实测直接崩在 `ld-2.25.so+0xCC04`。A6700 的 `canvas_panel.c` 就是先 `dlsym` 再 patch 的。
+- **`setLocalPos` 的 mangled 名是 `_ZN2ux6wgtsys6Widget11setLocalPosERKNS_4core7Vector2E`**（长度 11）。写成 `12` 时 `dlsym` 返回 NULL，日志里表现为 `touch hook 3/3, setLocalPos=(nil)`。
+
+实测（`run-zsi92d06`）：`touch hook 3/3, setLocalPos=0x7f7316d05c`，随后 `drag start 264,93 (widget 0,0)` → `drag end 371,256 (widget 107,163)`，位移与坐标差值逐项吻合，全程无 fault。
