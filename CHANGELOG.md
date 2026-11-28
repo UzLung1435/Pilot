@@ -2,6 +2,8 @@
 
 ## 未发布（A7C II 2.01 适配 + 机型隔离）
 
+- **新增进度快照 `docs/A7C2_PROGRESS.md`**：把 A7 C II 适配的当前状态分门别类整理成一份文档 —— 能力矩阵（画布后端实测通过／菜单项显示与点击已证伪／CP 读未实机验证／CP 写三项前提未确证）、已确证的技术事实（含 appFw 段布局、30 个 GOT 槽、菜单组表与 gid 编码、屏幕 id 体系、自建渲染层链路、CP 的两镜像对照与 OPD 地址推导）、未完成项按「已确证只差实现／有线索待验证／纯猜测需实验」三类分列、已证伪的六条路线、风险表与下一步建议。文档同时标注了哪些结论有实测日志支撑、哪些只是推断，以及需要外部输入的三件事。
+
 - **A7C II menu_ui 结论：无法新增自定义菜单条目。** 对照实验：同一行只改 id，`0x1F00` 显示空行并报「此功能被禁止」，换成真实 id `0x8` 立刻显示「影像质量设置」并能进入其页面。原因是条目名称与点击目标都由 id 查表得到（`menu::util::util_instance::get_name_resid_raw_file_type` 的 switch 编译在 `.text` 内），文本又经 `ResourceManager::prefetchTextImage` 预渲染成图片，自定义 RID 没有对应图片。菜单注入因此改为编译期 opt-in（`-DPILOT_A7C2_ENABLE_MENU_INJECT`，默认关闭）；默认产物只读 `modules.txt`、注册选项、安装 `setString`/`view_string` 两个 hook，不改原生菜单表。A7C II 产物 71,672 B / SHA-256 `6f760319…`；A6700 仍 79,456 B / `0cf89a76…`。
 - 新增 `patch.a7c2.json` 与 `patch.a7c2.image.json`：ILCE-7CM2 2.01 的 DT_INIT 启动钩子映射与离线镜像描述。
 - 注入岛按 A7C II 的 `DT_INIT 0x165cfb8`、`dlsym/dlopen` PLT 与 `PT_LOAD[0]` 段尾空隙重定位，四个补丁窗口与原厂基线逐字节校验。

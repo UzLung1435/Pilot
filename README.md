@@ -42,9 +42,10 @@ Pilot 是一个面向索尼相机固件的扩展框架，为模块提供非 Jiri
 | 机型 | 固件 | 补丁映射 | 常驻 DSO / 模块标记 | 状态 |
 |---|---|---|---|---|
 | Sony ILCE-6700 | 2.00 | `patch.a6700.json` | `pilot.so` / `pilot_module_model_a6700` | 实机验证 |
-| Sony ILCE-7CM2（A7C II） | 2.01 | `patch.a7c2.json` | `pilot_a7c2.so` / `pilot_module_model_a7c2` | 离线适配完成，实机未验收 |
+| Sony ILCE-7CM2（A7C II） | 2.01 | `patch.a7c2.json` | `pilot_a7c2.so` / `pilot_module_model_a7c2` | 离线适配完成；画布模块已在 qemu 实测，菜单项受 id 限制未打通 |
 
 A7C II 的固件依据、注入岛重定位、四个补丁窗口与未验项见 [A7C II 适配说明](docs/A7C2-PORT.md)。
+适配的当前状态（哪些已实测、哪些只差实现、哪些仍是猜测）见 [A7 C II 进度快照](docs/A7C2_PROGRESS.md)。
 `patch.a7c2.image.json` 是配套的 `pilot.patch.v1` 离线镜像描述。
 
 ## 机型隔离
@@ -53,7 +54,10 @@ A7C II 的固件依据、注入岛重定位、四个补丁窗口与未验项见 
 
 构建时通过 `PILOT_MODEL=a6700|a7c2` 选择机型（默认 `a6700`）；模块必须调用 `PILOT_DECLARE_MODULE_MODEL()` 导出对应标记。刷写前、部署时、运行时各有一次机型校验，装错机型的 DSO 或模块会在加载前被拒绝。A6700 已验证的产物保持原样，A7C II 使用全套 `a7c2` 命名。
 
-6K 仍是 ILCE-6700 2.00 专用模块，非 `a6700` 的构建会被脚本拒绝；MenuUI 已有 A7C II 后端，用 `PILOT_MODEL=a7c2` 构建，两机的实现与菜单入口不同，见 [A7C II 菜单说明](modules/menu_ui/a7c2/README.md)。Pilot Canvas 同样是 ILCE-6700 2.00 专用（原生 GOT 槽位、DISP 模式 BSS 与 CP RAM 地址只在 A6700 上定位过），构建脚本拒绝其它机型，见 [画布模块说明](modules/pilot_canvas/README.md)。
+6K 仍是 ILCE-6700 2.00 专用模块，非 `a6700` 的构建会被脚本拒绝。MenuUI 与 Pilot Canvas 都有 A7 C II 后端，用 `PILOT_MODEL=a7c2` 构建：
+
+- **MenuUI**：A7 C II 的菜单条目名称与点击目标由条目 id 查表决定（不是描述符里的 RID 字段），新增自定义 id 会显示为空白并报「此功能被禁止」，因此菜单注入改成了编译期 opt-in（默认关闭），后端只做读清单、注册选项与两个文本 hook。见 [A7 C II 菜单结论](modules/menu_ui/A7C2_PORT_STATUS.md)。
+- **Pilot Canvas**：不复用 A6700 的 Live View 文本槽（A7 C II 上没有对应槽位），改为自建渲染层与 widget，已实测画出网格、波形占位、触摸拖动、双击切页与主界面守卫。见 [画布模块说明](modules/pilot_canvas/README.md) 与 [可行性分析](modules/pilot_canvas/A7C2_FEASIBILITY.md)。
 
 ## 特性
 
@@ -142,4 +146,4 @@ PILOT_MODEL=a7c2 PILOT_SYSROOT=/path/to/a7c2-2.01/sysroot \
 
 ## Pilot Canvas
 
-[画布与实时波形模块使用说明](modules/pilot_canvas/README.md)：在 Live View 上叠加 RGB Parade、亮度/RGB 波形与直方图，按 `DISP` 切入 Pilot 虚拟显示页，并向其他模块导出批量矩形/折线/OSD 文本与多槽位文本接口。仅适用于 ILCE-6700 2.00，构建脚本在其他机型上直接拒绝。
+[画布与实时波形模块使用说明](modules/pilot_canvas/README.md)：在 Live View 上叠加 RGB Parade、亮度/RGB 波形与直方图，按 `DISP` 切入 Pilot 虚拟显示页，并向其他模块导出批量矩形/折线/OSD 文本与多槽位文本接口。A6700 2.00 为完整实现；A7 C II 2.01 为自建渲染层后端，已支持网格、波形占位、触摸拖动与双击切页，OPD 实时数据待实机验证。
