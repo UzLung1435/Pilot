@@ -19,8 +19,8 @@ A6700 的 `cpapp-b.bin` 不在工作区（工作区里所有 `cpapp-b.bin` 都�
 18,090,880 B 版本）。从官方固件里解出来：
 
 ```bash
-python work/fx2-unpack/unpack_dat.py "ILCE-A6700-v2.00-BODYDATA.DAT" work/a6700-unpack
-python work/a6700_find_cp2.py work/a6700-unpack/firmware.tar work/a6700-unpack
+python tools/cp/unpack_dat.py "ILCE-A6700-v2.00-BODYDATA.DAT" work/a6700-unpack
+python tools/cp/a6700_find_cp2.py work/a6700-unpack/firmware.tar work/a6700-unpack
 ```
 
 - `unpack_dat.py` 需要 `Cryptodome`（Windows 侧 `pip install pycryptodomex` 已装好）。
@@ -67,7 +67,7 @@ A6700 的 `canvas_cp_sensors.c` 用 `CP_OPD_TABLE_VA 0x015B6398`，步长 `0x70`
 `CP_OPD_TABLE_VA + slot*CP_OPD_ENTRY_STRIDE` 的算法逐步对应。
 
 同一组函数在 A7 C II 镜像里逐字节相同，只换了立即数
-（`work/cp_pairs.py` 可以复现）：
+（`tools/cp/cp_pairs.py` 可以复现）：
 
 ```
 86d5f2: f241 7138   movw  r1, #0x1738
@@ -102,13 +102,13 @@ A6700 的 `canvas_cp_sensors.c` 用 `CP_OPD_TABLE_VA 0x015B6398`，步长 `0x70`
 交叉检查：A6700 在 VA `0xC63EA4` 处是数据（`08 20 10 c1 …`），A7 C II 在
 VA `0xC12D68` 处是代码 —— 两版的零区位置不同，必须各自定。
 
-候选 cave 的性质（`work/cp_cave_ctx.py`）：
+候选 cave 的性质（`tools/cp/cp_cave_ctx.py`）：
 
 - 前邻 `0xC63E64`–`0xC63EA4` 是 Thumb 代码；
 - 后邻 `0xC65F24` 起是只读字符串（`000000000000%02u%02u`、`[%6d] Loader Err…`）；
 - 与 A6700 cave 的"零区夹在代码与数据之间"同型。
 
-引用审计（`work/cp_refs.py`，枚举全镜像的 `movw/movt` 对）：
+引用审计（`tools/cp/cp_refs.py`，枚举全镜像的 `movw/movt` 对）：
 
 - A6700 指向自己 cave `0xC12D68..0xC13000` 的引用：**0 处**；
 - A7 C II 指向候选 `0xC63EA4..0xC641A4` 的引用：**0 处**。
@@ -133,14 +133,14 @@ A7 C II 上验证 §3 的地址能读出合理数据，再决定要不要推进�
 
 | 脚本 | 用途 |
 | --- | --- |
-| `work/fx2-unpack/unpack_dat.py` | 解 `.DAT` 固件（需 `Cryptodome`） |
-| `work/a6700_find_cp2.py` | 按 loader 头 + sha256 从 `firmware.tar` 提取 CP 镜像 |
-| `work/cp_pairs.py <lo> <hi> [shift]` | 解码区间内所有 `movw/movt` 对，用于两镜像地址对照 |
-| `work/cp_refs.py <image> <lo> <hi>` | 全镜像枚举 `movw/movt`，审计是否有代码引用某地址窗口 |
-| `work/cp_cave_ctx.py` | 打印两个 cave 候选前后的字节与零区长度 |
-| `work/cp_scan.py` | 扫 hook 模式，打印文件偏移与 16 字节上下文 |
-| `work/cp_inspect.sh <file_off>:<len>` | 十六进制查看（VA = 偏移 + `0x108000`） |
-| `work/cp_segments.py` | 64 KiB 块的非零/可打印密度图 |
+| `tools/cp/unpack_dat.py` | 解 `.DAT` 固件（需 `Cryptodome`） |
+| `tools/cp/a6700_find_cp2.py` | 按 loader 头 + sha256 从 `firmware.tar` 提取 CP 镜像 |
+| `tools/cp/cp_pairs.py <lo> <hi> [shift]` | 解码区间内所有 `movw/movt` 对，用于两镜像地址对照 |
+| `tools/cp/cp_refs.py <image> <lo> <hi>` | 全镜像枚举 `movw/movt`，审计是否有代码引用某地址窗口 |
+| `tools/cp/cp_cave_ctx.py` | 打印两个 cave 候选前后的字节与零区长度 |
+| `tools/cp/cp_scan.py` | 扫 hook 模式，打印文件偏移与 16 字节上下文 |
+| `tools/cp/cp_inspect.sh <file_off>:<len>` | 十六进制查看（VA = 偏移 + `0x108000`） |
+| `tools/cp/cp_segments.py` | 64 KiB 块的非零/可打印密度图 |
 
 ## 7. IDA 参数
 
