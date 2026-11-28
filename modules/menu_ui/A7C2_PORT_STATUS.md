@@ -326,3 +326,33 @@ while (done < len) {
 
 修好后的产物 71,424 B，sha256
 `a802b893ab23d6d3b50d0699af09378fe1a83b2d94551a5a63fd2a7e3a2bdf72`。
+
+## 调试通道：把日志送到串口
+
+qemu 崩溃后 SD 卡写不回去，`/pilot/modules/<名>/module.log` 只会保留崩溃前最后一次成功写入，注入过程本身反而看不到。模块因此把每条日志同时写进内核环形缓冲：
+
+- 首选 `/dev/kmsg`，行首带 `<6>` 优先级前缀；
+- 打不开时回退 `/dev/console`，用 `O_NONBLOCK` 打开，避免无人读的 console 把钩子卡住；
+- 串口里所有行以 `pilot menu_ui:` 开头，`grep 'pilot menu_ui' console.log` 即可。
+
+正常启动的先后顺序：
+
+```
+pilot menu_ui: worker start
+pilot menu_ui: pilot menu_ui a7c2 <date> <time>
+pilot menu_ui: appFw base = 0x...
+pilot menu_ui: manifest: 1 module(s), global disable=0
+pilot menu_ui: menu table copied: ... -> ..., cat0=... count=1
+pilot menu_ui: cat0 count -> 2, slot=1, rows=1, desc_pool=0x...
+pilot menu_ui: group: ...
+pilot menu_ui: row0: ...
+pilot menu_ui: desc0: ...
+pilot menu_ui: group injected: category 0 slot 1, 1 rows
+pilot menu_ui: menu group installed
+pilot menu_ui: setString hook installed, original=0x...
+pilot menu_ui: view_string hook at 0x...
+pilot menu_ui: options registered
+pilot menu_ui: init complete
+```
+
+`view_string: rid 0x... -> "..."` 最多打印 8 行，用来确认行文本接管确实生效。崩溃前最后一条 `pilot menu_ui:` 就是嫌疑位置：缺 `group injected` 说明卡在表拷贝或槽校验，缺 `init complete` 说明卡在钩子安装。

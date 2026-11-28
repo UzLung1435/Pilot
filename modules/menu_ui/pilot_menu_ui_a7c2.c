@@ -26,6 +26,7 @@
 #define _GNU_SOURCE
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <link.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -88,18 +89,70 @@ static char g_rid_text_pool[PILOT_RID_LIST_ITEM_MAX + 4u][PILOT_RID_TEXT_MAX];
 /* Logging and memory helpers                                         */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The module log file lives on the SD card, and the emulator cannot write the
+ * card back once the guest has faulted -- whatever happened right before the
+ * crash is lost.  Mirror every message to the kernel ring buffer (or the
+ * console device when kmsg is unavailable) so the serial log keeps it.
+ */
+static int g_console_fd = -1;
+static int g_console_is_kmsg;
+
+static void console_emit(const char *line)
+{
+    char buf[320];
+    int len;
+
+    if (g_console_fd < 0) {
+        g_console_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+        g_console_is_kmsg = 1;
+        if (g_console_fd < 0) {
+            /* Non-blocking: an unread console must never stall the hook. */
+            g_console_fd = open("/dev/console", O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+            g_console_is_kmsg = 0;
+        }
+        if (g_console_fd < 0)
+            return;
+    }
+
+    if (g_console_is_kmsg)
+        len = snprintf(buf, sizeof(buf), "<6>pilot menu_ui: %s\n", line);
+    else
+        len = snprintf(buf, sizeof(buf), "pilot menu_ui: %s\n", line);
+    if (len > 0) {
+        ssize_t ignored = write(g_console_fd, buf, (size_t)len);
+
+        (void)ignored;
+    }
+}
+
 static void log_msg(const char *fmt, ...)
 {
-    char buf[192];
+    char buf[320];
     va_list ap;
-
-    if (!g_api || !g_api->mlog || !g_api->mlog->print)
-        return;
 
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    (void)g_api->mlog->print(g_api->mlog, buf);
+
+    if (g_api && g_api->mlog && g_api->mlog->print)
+        (void)g_api->mlog->print(g_api->mlog, buf);
+    console_emit(buf);
+}
+
+/* Hex dump helper: the A7C II menu code walks these structures blindly, so a
+ * field that is merely "wrong" shows up as a wild pointer deep inside appFw. */
+static void log_hex(const char *what, const void *ptr, size_t len)
+{
+    const unsigned char *p = (const unsigned char *)ptr;
+    char out[256];
+    size_t i;
+    int pos;
+
+    pos = snprintf(out, sizeof(out), "%s:", what);
+    for (i = 0; i < len && pos > 0 && (size_t)pos + 3u < sizeof(out); ++i)
+        pos += snprintf(out + pos, sizeof(out) - (size_t)pos, " %02x", p[i]);
+    log_msg("%s", out);
 }
 
 static int appfw_base_cb(struct dl_phdr_info *info, size_t size, void *data)
@@ -309,6 +362,7 @@ static int install_set_string_hook(void)
 
 __attribute__((visibility("hidden"))) void *g_a7c2_vs_trampoline;
 static unsigned int g_a7c2_vs_bad_calls;
+static unsigned int g_a7c2_vs_hits;
 
 __attribute__((noinline, used)) static void a7c2_view_string_fixup(void *view)
 {
@@ -334,6 +388,10 @@ __attribute__((noinline, used)) static void a7c2_view_string_fixup(void *view)
         return;
     put_u32(view, A7C2_VS_RID_OFF, 0xFFFFFFFFu); /* fall back to the C string */
     put_u64(view, A7C2_VS_CSTR_OFF, (uint64_t)(uintptr_t)text);
+    if (g_a7c2_vs_hits < 8u) {
+        ++g_a7c2_vs_hits;
+        log_msg("view_string: rid 0x%x -> \"%s\"", (unsigned)rid, text);
+    }
 }
 
 /*
@@ -673,6 +731,8 @@ static int install_menu_group(void)
 
     cat0 = g_menu_copy + APPFW_MENU_CAT_BASE_OFF;
     cat_count = get_u32(cat0, APPFW_MENU_CAT_COUNT_OFF);
+    log_msg("menu table copied: %p -> %p, cat0=%p count=%u", (void *)got,
+            (void *)g_menu_copy, (void *)cat0, (unsigned)cat_count);
     if (cat_count >= APPFW_MENU_CAT_GROUPS) {
         log_msg("category 0 is full (count=%u)", (unsigned)cat_count);
         return -1;
@@ -684,6 +744,7 @@ static int install_menu_group(void)
     if (memcmp(group, zero, sizeof(zero)) != 0) {
         log_msg("group slot %u is not empty, refusing to overwrite",
                 (unsigned)cat_count);
+        log_hex("slot-head", group, 32);
         return -1;
     }
 
@@ -710,6 +771,15 @@ static int install_menu_group(void)
     }
 
     put_u32(cat0, APPFW_MENU_CAT_COUNT_OFF, cat_count + 1u);
+
+    /* Dump what the UI is about to walk: if the crash lands inside appFw
+     * these bytes are the only evidence of what it was handed. */
+    log_msg("cat0 count -> %u, slot=%u, rows=%u, desc_pool=%p",
+            (unsigned)(cat_count + 1u), (unsigned)cat_count,
+            (unsigned)g_row_count, (void *)g_desc_pool);
+    log_hex("group", group, 48);
+    log_hex("row0", group + APPFW_MENU_GROUP_ENTRY_OFF, 24);
+    log_hex("desc0", g_desc_pool, 48);
 
     table_addr = (uintptr_t)g_menu_copy;
     if (patch_mem(APPFW_GOT_MENU_TABLE, &table_addr, sizeof(table_addr)) !=
@@ -791,6 +861,7 @@ static void seed_texts(void)
 static void *worker(void *arg)
 {
     (void)arg;
+    log_msg("worker start");
 
     g_appfw_base = 0;
     if (!dl_iterate_phdr(appfw_base_cb, &g_appfw_base) || !g_appfw_base) {
@@ -801,6 +872,7 @@ static void *worker(void *arg)
     log_msg("appFw base = %p", (void *)g_appfw_base);
 
     load_modules();
+    log_msg("manifest: %u module(s)", (unsigned)g_mod_count);
     if (install_menu_group() != 0)
         log_msg("menu group NOT installed");
     seed_texts();
@@ -814,6 +886,7 @@ static void *worker(void *arg)
 #endif
 
     register_options();
+    log_msg("init complete");
 
     for (;;)
         sleep(1);
