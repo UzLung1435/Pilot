@@ -476,3 +476,27 @@ sub_1B5AC70 → sub_1B60228(obj, &row.gid, mode, out, x4, x5)
 的数据直接造成的**。判定归属需要一次对照实验：用
 `PILOT_EXTRA_CFLAGS=-DPILOT_A7C2_NO_MENU_INJECT` 构建一版完全不改菜单表的产物，
 同样的操作序列下如果仍然崩溃，故障就在 appFw 侧。
+## 十六、菜单表是「五处硬编码 + 一处 GOT」而不是单一 GOT
+
+`ida_xrefs_to(0x051DF8C8)` 的结果推翻了我最初的假设：
+
+| 引用位置 | 类型 |
+| --- | --- |
+| `0x1B5A278` | 代码，直接 `adrp/add` 到表地址 |
+| `0x1B5ACC8` | 代码（`sub_1B5AC70` 内 `v16 = dword_51DF8C8`） |
+| `0x1B5B054` | 代码 |
+| `0x1B5B15C` | 代码 |
+| `0x1B5FC38` | 代码 |
+| `0x05B80EC0` | `.got` 槽（唯一走 GOT 的） |
+
+A6700 的 `pilot_install_menu_table()` 做法是「复制整表 → 改副本 → 把 GOT 指向副本」。在 A7C II 上这么做的后果是：**走 GOT 的那一处读到副本，五个硬编码点依旧读原生表**，菜单系统看到两份互不一致的数据，按 Menu 键即崩在 `sub_1B765B0`（`base + 0x1B765C8`，`LDRH W1,[X0,#0x2C]`），`x0` 是从错位字段里取出的垃圾值（`0xb2e1` / `0xaeb1`，都是小奇数）。
+
+对照实验坐实了这条因果：同一个 SD 卡，注入版崩、`-DPILOT_A7C2_NO_MENU_INJECT` 诊断版不崩，两者除注入外完全相同。
+
+因此 A7 C II 后端改为**直接 patch 原生表**：
+
+1. 从 `APPFW_GOT_MENU_TABLE` 读表地址并校验它等于 `base + APPFW_MENU_TABLE_OFF`（GOT 本身不重定向）；
+2. 把 cat0 的空槽内容、`count` 原地写入 —— `pilot_memory_patch_impl()` 会 `mprotect` 出写权限再恢复，`.data.rel.ro` 因此可写；
+3. 描述符池仍由模块 `calloc`，指针写进原生表（同一进程地址空间，appFw 可直接读）。
+
+`patch_mem()` 原先有 16 字节上限（`uint8_t expected[16]`），组槽是 `0x2E0` 字节，改成按 `len` 动态分配 expected。

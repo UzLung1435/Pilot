@@ -63,7 +63,6 @@ static const PilotApi *g_api;
 static uintptr_t g_appfw_base;
 
 #ifndef PILOT_A7C2_NO_MENU_INJECT
-static uint8_t *g_menu_copy;    /* APPFW_MENU_TABLE_SIZE bytes */
 static uint8_t *g_desc_pool;    /* row_count * APPFW_DESC_SIZE */
 static size_t g_row_count;
 #endif
@@ -212,22 +211,93 @@ static int read_mem(uintptr_t off, void *dst, size_t len)
     return read_mem_status(off, dst, len, NULL);
 }
 
-static int patch_mem(uintptr_t off, const void *src, size_t len)
+static int page_protection(uintptr_t addr)
 {
-    uint8_t expected[16];
+    FILE *maps = fopen("/proc/self/maps", "r");
+    char line[512];
+    int prot = -1;
 
-    if (!g_api || !g_api->memory_patch || !g_appfw_base)
-        return -1;
-    if (len > sizeof(expected))
-        return -1;
-    if (read_mem(off, expected, len) != 0)
-        return -1;
-    return g_api->memory_patch(g_appfw_base + off, expected, src, len) ==
-                   PILOT_STATUS_OK
-               ? 0
-               : -1;
+    if (!maps)
+        return PROT_READ | PROT_WRITE;
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long start = 0;
+        unsigned long end = 0;
+        char perms[8] = { 0 };
+
+        if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3)
+            continue;
+        if (addr < (uintptr_t)start || addr >= (uintptr_t)end)
+            continue;
+        prot = 0;
+        if (perms[0] == 'r')
+            prot |= PROT_READ;
+        if (perms[1] == 'w')
+            prot |= PROT_WRITE;
+        if (perms[2] == 'x')
+            prot |= PROT_EXEC;
+        break;
+    }
+    fclose(maps);
+    return prot < 0 ? (PROT_READ | PROT_WRITE) : prot;
 }
 
+/*
+ * pilot_memory_patch_impl() refuses anything longer than 64 bytes and the menu
+ * group slot is 0x2E0, so the module opens the write window itself: look the
+ * page protection up in /proc/self/maps, mprotect it writable, copy, restore.
+ * appFw's .data.rel.ro is mapped read-only under RELRO, which is why the plain
+ * memcpy would fault.
+ */
+static int write_native(uintptr_t addr, const void *src, size_t len)
+{
+    long page_size = sysconf(_SC_PAGESIZE);
+    uintptr_t page;
+    uintptr_t end;
+    size_t span;
+    int prot;
+
+    if (page_size <= 0 || !len)
+        return -1;
+    page = addr & ~((uintptr_t)page_size - 1u);
+    end = (addr + len + (uintptr_t)page_size - 1u) &
+          ~((uintptr_t)page_size - 1u);
+    span = (size_t)(end - page);
+    prot = page_protection(addr);
+    if (mprotect((void *)page, span, prot | PROT_WRITE) != 0) {
+        log_msg("mprotect rw failed for %p", (void *)addr);
+        return -1;
+    }
+    memcpy((void *)addr, src, len);
+    __builtin___clear_cache((char *)addr, (char *)addr + len);
+    if (mprotect((void *)page, span, prot) != 0) {
+        log_msg("mprotect restore failed for %p", (void *)addr);
+        return -1;
+    }
+    return 0;
+}
+
+static int patch_mem(uintptr_t off, const void *src, size_t len)
+{
+    uint8_t *expected;
+    int failed;
+
+    if (!g_appfw_base || !len)
+        return -1;
+    expected = malloc(len);
+    if (!expected)
+        return -1;
+    if (read_mem(off, expected, len) != 0) {
+        free(expected);
+        return -1;
+    }
+    if (memcmp(expected, src, len) == 0) {
+        free(expected);
+        return 0;
+    }
+    failed = write_native(g_appfw_base + off, src, len) != 0;
+    free(expected);
+    return failed ? -1 : 0;
+}
 static uint32_t get_u32(const void *base, size_t off)
 {
     uint32_t val = 0;
@@ -696,13 +766,20 @@ static void fill_desc(uint8_t *desc, uint32_t label_rid, uint32_t screen_id)
 static int install_menu_group(void)
 {
     uintptr_t got = 0;
-    uintptr_t table_addr;
-    uint8_t *cat0;
-    uint8_t *group;
+    uintptr_t cat0;
+    uintptr_t group;
+    uint8_t old_group[APPFW_MENU_GROUP_SIZE];
+    uint8_t new_group[APPFW_MENU_GROUP_SIZE];
     uint8_t zero[APPFW_MENU_GROUP_SIZE];
     uint32_t cat_count;
     size_t i;
 
+    /*
+     * The GOT slot is only one of six references to the group table; five
+     * code sites load APPFW_MENU_TABLE_OFF directly.  Redirecting the GOT
+     * leaves the menu split across two tables, so patch the native table in
+     * place and let every reader see the same bytes.
+     */
     if (read_mem(APPFW_GOT_MENU_TABLE, &got, sizeof(got)) != 0) {
         log_msg("menu table GOT unreadable");
         return -1;
@@ -713,46 +790,30 @@ static int install_menu_group(void)
         return -1;
     }
 
-    g_menu_copy = calloc(1, APPFW_MENU_TABLE_SIZE);
-    if (!g_menu_copy) {
-        log_msg("menu table copy allocation failed");
+    cat0 = (uintptr_t)APPFW_MENU_CAT_BASE_OFF;
+    if (read_mem(cat0 + (uintptr_t)APPFW_MENU_CAT_COUNT_OFF, &cat_count,
+                 sizeof(cat_count)) != 0) {
+        log_msg("category 0 count unreadable");
         return -1;
     }
-    {
-        size_t copied = 0;
-
-        while (copied < (size_t)APPFW_MENU_TABLE_SIZE) {
-            size_t chunk = (size_t)APPFW_MENU_TABLE_SIZE - copied;
-            PilotStatus rc;
-
-            if (chunk > 4096u)
-                chunk = 4096u;
-            if (read_mem_status((uintptr_t)(APPFW_MENU_TABLE_OFF + copied),
-                                g_menu_copy + copied, chunk, &rc) != 0) {
-                log_msg("menu table copy failed at +0x%x (%u bytes): %d",
-                        (unsigned)copied, (unsigned)chunk, (int)rc);
-                return -1;
-            }
-            copied += chunk;
-        }
-    }
-
-    cat0 = g_menu_copy + APPFW_MENU_CAT_BASE_OFF;
-    cat_count = get_u32(cat0, APPFW_MENU_CAT_COUNT_OFF);
-    log_msg("menu table copied: %p -> %p, cat0=%p count=%u", (void *)got,
-            (void *)g_menu_copy, (void *)cat0, (unsigned)cat_count);
+    log_msg("native menu table %p, cat0 count=%u", (void *)got,
+            (unsigned)cat_count);
     if (cat_count >= APPFW_MENU_CAT_GROUPS) {
         log_msg("category 0 is full (count=%u)", (unsigned)cat_count);
         return -1;
     }
 
-    group = cat0 + APPFW_MENU_CAT_GROUP_OFF +
+    group = cat0 + (uintptr_t)APPFW_MENU_CAT_GROUP_OFF +
             (size_t)cat_count * APPFW_MENU_GROUP_SIZE;
     memset(zero, 0, sizeof(zero));
-    if (memcmp(group, zero, sizeof(zero)) != 0) {
+    if (read_mem(group, old_group, sizeof(old_group)) != 0) {
+        log_msg("group slot %u unreadable", (unsigned)cat_count);
+        return -1;
+    }
+    if (memcmp(old_group, zero, sizeof(zero)) != 0) {
         log_msg("group slot %u is not empty, refusing to overwrite",
                 (unsigned)cat_count);
-        log_hex("slot-head", group, 32);
+        log_hex("slot-head", old_group, 32);
         return -1;
     }
 
@@ -763,9 +824,10 @@ static int install_menu_group(void)
         return -1;
     }
 
-    put_u32(group, APPFW_MENU_GROUP_INDEX_OFF, PILOT_GROUP_INDEX_FREE);
-    put_u32(group, APPFW_MENU_GROUP_RID_OFF, PILOT_RID_MENU_LABEL);
-    put_u32(group, APPFW_MENU_GROUP_ROWS_OFF, (uint32_t)g_row_count);
+    memset(new_group, 0, sizeof(new_group));
+    put_u32(new_group, APPFW_MENU_GROUP_INDEX_OFF, PILOT_GROUP_INDEX_FREE);
+    put_u32(new_group, APPFW_MENU_GROUP_RID_OFF, PILOT_RID_MENU_LABEL);
+    put_u32(new_group, APPFW_MENU_GROUP_ROWS_OFF, (uint32_t)g_row_count);
 
     for (i = 0; i < g_row_count; ++i) {
         uint8_t *desc = g_desc_pool + i * APPFW_DESC_SIZE;
@@ -773,30 +835,36 @@ static int install_menu_group(void)
 
         fill_desc(desc, PILOT_RID_LIST_ITEM_BASE + (uint32_t)i,
                   APPFW_ITEM_SCREEN_ID);
-        put_u64(group, row_off + 0u, PILOT_ITEM_ID_BASE + i);
-        put_u64(group, row_off + 8u, 0);            /* setting_desc     */
-        put_u64(group, row_off + 16u, (uint64_t)(uintptr_t)desc);
+        put_u64(new_group, row_off + 0u, PILOT_ITEM_ID_BASE + i);
+        put_u64(new_group, row_off + 8u, 0);            /* setting_desc     */
+        put_u64(new_group, row_off + 16u, (uint64_t)(uintptr_t)desc);
     }
 
-    put_u32(cat0, APPFW_MENU_CAT_COUNT_OFF, cat_count + 1u);
-
-    /* Dump what the UI is about to walk: if the crash lands inside appFw
-     * these bytes are the only evidence of what it was handed. */
-    log_msg("cat0 count -> %u, slot=%u, rows=%u, desc_pool=%p",
-            (unsigned)(cat_count + 1u), (unsigned)cat_count,
-            (unsigned)g_row_count, (void *)g_desc_pool);
-    log_hex("group", group, 48);
-    log_hex("row0", group + APPFW_MENU_GROUP_ENTRY_OFF, 24);
+    log_hex("group", new_group, 48);
+    log_hex("row0", new_group + APPFW_MENU_GROUP_ENTRY_OFF, 24);
     log_hex("desc0", g_desc_pool, 48);
 
-    table_addr = (uintptr_t)g_menu_copy;
-    if (patch_mem(APPFW_GOT_MENU_TABLE, &table_addr, sizeof(table_addr)) !=
-        0) {
-        log_msg("menu table GOT patch failed");
+    if (patch_mem(group, new_group, sizeof(new_group)) != 0) {
+        log_msg("group slot patch failed at +0x%x", (unsigned)group);
         return -1;
     }
 
-    log_msg("group injected: category 0 slot %u, %u rows",
+#ifndef PILOT_A7C2_NO_COUNT_BUMP
+    {
+        uint32_t bumped = cat_count + 1u;
+
+        if (patch_mem(cat0 + (uintptr_t)APPFW_MENU_CAT_COUNT_OFF, &bumped,
+                      sizeof(bumped)) != 0) {
+            log_msg("category 0 count patch failed");
+            return -1;
+        }
+        log_msg("cat0 count -> %u", (unsigned)bumped);
+    }
+#else
+    log_msg("count bump disabled at build time (diagnostic)");
+#endif
+
+    log_msg("group injected into native table: category 0 slot %u, %u rows",
             (unsigned)cat_count, (unsigned)g_row_count);
     return 0;
 }
