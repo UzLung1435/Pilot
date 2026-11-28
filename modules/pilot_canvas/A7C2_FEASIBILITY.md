@@ -97,3 +97,33 @@ id/名字表驱动，没有 A6700 那种可自由插入的空白位置。区别�
 | 菜单组表 GOT → 表基址 | `0x05B80EC0` → `0x051DF8C8` |
 | 屏幕/presenter 表 GOT → 表基址 | `0x05B4CFD0` → `0x051F7810`（项 `0x60`） |
 | view 层构造例程（5 次 createLayer） | `0x17CCF6C` |
+
+## Fsys 不认长文件名（2026-11-28 实测）
+
+第一次把探针放到卡上时，模块根本没有被加载。console.log 里只有这一行：
+
+```
+FSYS_FILE_TRACE op=Open path=A:/pilot/pilot_canvas_probe.so handle=0 flags=0x1 result=-2147483583 hex=0x80000041
+```
+
+同一份日志里紧邻的一行是成功的：
+
+```
+FSYS_FILE_TRACE op=Open path=A:/pilot/MNUI.so handle=81 flags=0x1 result=0
+```
+
+两个文件在卡上都能用 `mdir` 看到，内容也正确，唯一差别是文件名长度：`MNUI.SO` 是 8.3 短名，`pilot_canvas_probe.so` 需要 FAT 长文件名项（`PILOT_~1.SO` + LFN 记录）。
+
+**结论：相机的 Fsys 只认 8.3 文件名，不解析 LFN。** 模块文件名必须满足「主名 <= 8 字符 + `.so`」，否则 `Fsys_Open` 返回 `0x80000041`。
+
+这条限制影响所有模块，不只是探针：
+
+| 名字 | 长度 | 可用 |
+| --- | --- | --- |
+| `MNUI.so` | 4 + 3 | 可以 |
+| `CPROBE.so` | 6 + 3 | 可以 |
+| `CANVAS.so` | 6 + 3 | 可以（建议给 canvas 用） |
+| `pilot_canvas.so` | 12 + 3 | 不可以 |
+| `pilot_canvas_probe.so` | 18 + 3 | 不可以 |
+
+A6700 上没有暴露这个问题，因为那边一直是把模块编成 `pilot_menu_ui.so` / `pilot_canvas.so` 并放到 `/pilot/`，`modules.txt` 也按长名引用 —— 这要么说明 A6700 的 Fsys 支持 LFN，要么说明那份部署从来没有真正走通，值得单独确认。
