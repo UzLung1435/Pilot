@@ -17,6 +17,55 @@
 
 #include "pilot_canvas_internal.h"
 
+#include <fcntl.h>
+#include <stdarg.h>
+#include <unistd.h>
+
+/* qemu never writes the SD card back after a crash, so a module.log-only
+   message is invisible exactly when it matters most.  Mirror every line to
+   the kernel ring buffer (falls back to /dev/console), reopening the device
+   per line: the UI framework closes descriptors it does not own. */
+static void host_mirror(const char *fmt, ...)
+{
+    char line[320];
+    va_list ap;
+    int n;
+    int fd;
+
+    va_start(ap, fmt);
+    n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n <= 0)
+        return;
+
+    fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        char out[360];
+        int m = snprintf(out, sizeof(out), "<6>pilot_canvas: %s\n", line);
+        ssize_t ignored;
+
+        if (m > 0)
+            ignored = write(fd, out, (size_t)m);
+        (void)ignored;
+        close(fd);
+        return;
+    }
+
+    fd = open("/dev/console", O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd >= 0) {
+        char out[360];
+        int m = snprintf(out, sizeof(out), "pilot_canvas: %s\n", line);
+        ssize_t ignored;
+
+        if (m > 0)
+            ignored = write(fd, out, (size_t)m);
+        (void)ignored;
+        close(fd);
+    }
+}
+
+#define hlog(...) do { mlogf(__VA_ARGS__); host_mirror(__VA_ARGS__); } while (0)
+
 /* Defined in canvas_core.c but absent from pilot_canvas_internal.h. */
 PilotStatus pilot_canvas_commit_v1(PilotCanvas *c);
 PilotStatus pilot_canvas_bind_widget_v1(PilotCanvas *c, void *widget);
@@ -63,7 +112,7 @@ static int host_wait_ui(void)
         (void)dl_iterate_phdr(host_find_appfw, NULL);
     }
     if (g_host_base == 0u) {
-        mlog("HOST a7c2: appFw base unknown");
+        hlog("HOST a7c2: appFw base unknown");
         return 0;
     }
 
@@ -72,14 +121,14 @@ static int host_wait_ui(void)
             g_host_base + APPFW_BSS_FIRST_LAYER);
 
         if (first != 0u) {
-            mlogf("HOST a7c2: ui ready after %d ms (layer0=%p)",
+            hlog("HOST a7c2: ui ready after %d ms (layer0=%p)",
                   polls * 250, (void *)(uintptr_t)first);
             return 1;
         }
         usleep(HOST_POLL_US);
         ++polls;
     }
-    mlog("HOST a7c2: ui never came up");
+    hlog("HOST a7c2: ui never came up");
     return 0;
 }
 
@@ -92,20 +141,20 @@ static int host_create_layer(void)
     void *wgtsys;
 
     if (gen_id == NULL || get_wgtsys == NULL || create_layer == NULL) {
-        mlog("HOST a7c2: layer symbols missing");
+        hlog("HOST a7c2: layer symbols missing");
         return 0;
     }
 
     wgtsys = get_wgtsys();
     if (wgtsys == NULL) {
-        mlog("HOST a7c2: wgtsys null");
+        hlog("HOST a7c2: wgtsys null");
         return 0;
     }
 
     g_host_layer_id = gen_id("PILOT_CV");
     g_host_layer = create_layer(wgtsys, &g_host_layer_id);
     if (g_host_layer == NULL) {
-        mlog("HOST a7c2: createLayer returned null");
+        hlog("HOST a7c2: createLayer returned null");
         return 0;
     }
 
@@ -118,7 +167,7 @@ static int host_create_layer(void)
             ((fn_layer_cfg)vt[3])(g_host_layer, 0);
     }
 
-    mlogf("HOST a7c2: layer=%p id=0x%08x", g_host_layer,
+    hlog("HOST a7c2: layer=%p id=0x%08x", g_host_layer,
           (unsigned)g_host_layer_id);
     return 1;
 }
@@ -133,7 +182,7 @@ static int host_create_widget(void)
         RTLD_DEFAULT, "_ZN2ux6wgtsys6Widget10setLayerIDERKNS_4core2IDE");
 
     if (ctor == NULL || set_size == NULL || set_layer == NULL) {
-        mlog("HOST a7c2: widget symbols missing");
+        hlog("HOST a7c2: widget symbols missing");
         return 0;
     }
 
@@ -142,7 +191,7 @@ static int host_create_widget(void)
     set_size(g_host_widget, (float)HOST_W, (float)HOST_H);
     set_layer(g_host_widget, &g_host_layer_id);
 
-    mlogf("HOST a7c2: widget=%p vptr=%p size=%dx%d", (void *)g_host_widget,
+    hlog("HOST a7c2: widget=%p vptr=%p size=%dx%d", (void *)g_host_widget,
           *(void **)g_host_widget, HOST_W, HOST_H);
     return 1;
 }
@@ -169,7 +218,7 @@ void pilot_canvas_a7c2_host_run(void)
     PilotCanvas *c;
     int tick = 0;
 
-    mlog("HOST a7c2: start");
+    hlog("HOST a7c2: start");
 
     if (!host_wait_ui())
         return;
@@ -180,14 +229,14 @@ void pilot_canvas_a7c2_host_run(void)
 
     c = pilot_canvas_create_v1(HOST_W, HOST_H, PILOT_CANVAS_BACKEND_RECT);
     if (c == NULL) {
-        mlog("HOST a7c2: canvas create failed");
+        hlog("HOST a7c2: canvas create failed");
         return;
     }
     if (pilot_canvas_bind_widget_v1(c, g_host_widget) != PILOT_STATUS_OK) {
-        mlog("HOST a7c2: bind widget failed");
+        hlog("HOST a7c2: bind widget failed");
         return;
     }
-    mlogf("HOST a7c2: canvas=%p bound, entering render loop", (void *)c);
+    hlog("HOST a7c2: canvas=%p bound, entering render loop", (void *)c);
 
     for (;;) {
         struct timespec ts = { 0, 33000000l };

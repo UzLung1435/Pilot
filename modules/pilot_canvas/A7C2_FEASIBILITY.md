@@ -259,3 +259,52 @@ PILOT_MODEL=a7c2 bash modules/pilot_canvas/build.sh build/CANVAS.so
 | 焦距/几何显示 | CP lens info 地址 | 未定位 |
 
 下一步建议先接触摸（GOT 已有），再找 CP RAM OPD 表，最后做示波器组件。
+
+## 实测结果（2026-11-28）
+
+装到 qemu 卡（`/pilot/CANVAS.so` 71,304 B，清单 `["MNUI.so", "CANVAS.so"]`）后重启，
+模块加载、自建层、自建 widget、600×300 canvas 全部就位：屏幕上出现深色网格与左右
+移动的绿色竖条，33 ms 循环持续运行，无 SEGV/DABT。
+
+这说明 A7 C II 上"没有可复用的 Live View widget"并不妨碍 canvas 工作 ——
+`createLayer` + `Widget()` 足以自建一个能上屏的宿主。
+
+## 数据源结论：CP RAM 取不到
+
+`canvas_cp_sensors.c` 的 OPD 波形依赖 `PilotCpMemApi`（`api->cp->read`），而
+`patch/pilot_cp_mem.c` 里的地址常量是 A6700 CP 固件的：
+
+```
+PILOT_CP_SELF_START  0x00C12D68 / PILOT_CP_SELF_END 0x00C12FC0
+PILOT_CP_CODE_START  0x00128000 / PILOT_CP_CODE_END 0x011D8000
+PILOT_CP_UIPC_STAT_VA 0x00C12FA0
+```
+
+`patch.a7c2.json` 没有 `cp` 段（顶层只有 `schema`/`title`/`purpose`/`target`/
+`runtime`/`analysis`/`segment`/`patches`/`preconditions`），即 A7 C II 的 CP 侧
+`uipc_v4` 钩子从未打过；`cpapp-b.bin`（18,090,880 B，A7 C II 的 CP 固件，在
+`oldProjects/FlashDir/backup1/candidate/`）也还没有分析。因此在 A7 C II 上：
+
+- `PilotCpMemApi` 面向的不是 A7 C II 的 CP 地址空间，OPD 表、WB 增益、焦距
+  （`0x015B6398` / `0x016A4998` / `0x01696490`）全是 A6700 的值，不可用；
+- 因而没有波形数据源，示波器 / 伪色 / 伽马曲线这些依赖 OPD 的功能无法移植。
+
+要恢复它们，得先完成 A7 C II 的 CP 补丁工程（把 `uipc_v4` 钩子移植到
+`cpapp-b.bin` 的等效地址，复用 `patch/cp/uipc_v4/{hook.S,patch_handler.c}`），
+这是独立于本模块的工作量。
+
+## 当前 A7 C II 上可用的能力
+
+| 能力 | 状态 |
+| --- | --- |
+| 自建渲染层与 widget | 可用（实测） |
+| RECT 后端 canvas（clear/fill_rect/line/blit/commit） | 可用（实测） |
+| `draw_grid` / `draw_osd_text` / `pilot_chart_draw_v1` | 可用（`canvas_core.c` 不依赖 CP） |
+| 多槽位文本（`pilot_canvas_text_set_v1`） | 未接（`canvas_text.c` 用的是 A6700 GOT 帧钩子） |
+| 触摸拖动 | 未接（`canvas_panel.c` 用的是 A6700 GOT） |
+| DISP 虚拟页 | 未接（同上） |
+| OPD 波形 / 示波器 / 伪色 | 阻塞（无 CP 数据源） |
+
+数据从哪来：`pilot_canvas_*_v1` 已导出（`create`/`bind_widget`/`clear`/
+`fill_rect`/`line`/`blit`/`draw_grid`/`draw_osd_text`/`chart`/`commit`），
+其他模块可以 `dlsym` 拿到后自己往画布里推数据。
