@@ -7,10 +7,22 @@
 
 #include "pilot_canvas_internal.h"
 
+#ifdef PILOT_MODEL_A7C2
+/* A7 C II 2.01.  Found by matching the five movw/movt pairs that materialise
+ * the table base in the CP firmware: A6700 uses 0x015B6398, the A7 C II build
+ * uses 0x01651738 in five byte-identical helper functions (see
+ * A7C2_CP_NOTES.md).  The slot arithmetic base + slot*0x70 matches the A6700
+ * code exactly (rsb r0, r0, r0, lsl #3 / add.w r0, r1, r0, lsl #4). */
+#define CP_OPD_TABLE_VA      0x01651738ull
+#else
 #define CP_OPD_TABLE_VA      0x015B6398ull
+#endif
 #define CP_OPD_ENTRY_STRIDE  0x70u
 #define OPD_READ_BYTES       11264u /* max(32*352, 26*384) = 11,264 B (3 DMAs) */
 
+/* A7 C II: these two consumer addresses were not located in 2.01 yet.  Reads
+ * hit unmapped CP RAM and return an error, which both callers already treat as
+ * "no value", so the lens and geometry readouts simply stay blank. */
 #define CP_LENS_INFO_BASE_VA 0x016A4998ull
 #define CP_WB_GAIN_OFF       0x334ull /* u16 RawWbRGain, u16 RawWbBGain */
 #define CP_SYNCRC_GEOM_VA    0x01696490ull

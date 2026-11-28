@@ -21,7 +21,7 @@ MODEL="${PILOT_MODEL:-a6700}"
 # addresses (appFw.so GOT slots, DISP mode BSS, CP RAM OPD table) and are not
 # linked into the A7C2 DSO.
 if [ "$MODEL" = "a7c2" ]; then
-    SRC_FILES=(pilot_canvas.c canvas_core.c a7c2_host.c)
+    SRC_FILES=(pilot_canvas.c canvas_core.c canvas_cp_sensors.c a7c2_host.c)
     MODEL_FLAGS=(-DPILOT_MODEL_A7C2)
     MODEL_SYMBOL=pilot_module_model_a7c2
     DEFAULT_SYSROOT=/opt/a7c2-sysroot

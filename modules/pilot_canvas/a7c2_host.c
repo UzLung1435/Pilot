@@ -14,7 +14,9 @@
 #include <dlfcn.h>
 #include <link.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "pilot_canvas_internal.h"
 
@@ -207,22 +209,81 @@ static int g_widget_y;
 static int g_view;
 #define HOST_VIEW_COUNT 3
 
+/* Latest metering-grid frame read from CP RAM (valid only when g_opd_ok). */
+static PilotOpdFrame g_opd_frame;
+static int g_opd_ok;
+
+/* Last controller screen whose getter ran; 0 means "nothing observed yet".
+   The page table entries at 0x051F7810 + 0x60*sid are getters that fire every
+   time the corresponding screen is constructed, so hooking them reports screen
+   switches without having to know what a screen even is. */
+static unsigned int g_last_screen;
+
+/* 0x343 is the live view / main screen -- it is the id that open_screen keeps
+   returning to.  Everything else observed so far (0x346 menu, 0x2C9, 0x344,
+   0x8F, 0xC2) is a sub screen that should own the display outright. */
+#define APPFW_MAIN_SCREEN 0x343u
+
+static int host_menu_visible(void)
+{
+    if (g_last_screen == 0u)
+        return 0; /* nothing observed yet: keep the canvas up */
+    return g_last_screen != APPFW_MAIN_SCREEN;
+}
+
 static void host_draw(PilotCanvas *c, int tick)
 {
     char line[32];
     int x;
 
     pilot_canvas_clear_v1(c, 0xFF101418u);
+    if (host_menu_visible()) {
+        /* A menu screen owns the display; leave it alone. */
+        pilot_canvas_commit_v1(c);
+        return;
+    }
     pilot_canvas_draw_grid_v1(c, 8, 9, 5, 0xFF203040u);
+
+    /* The metering grid lives in CP RAM and is read through /dev/pcidma, which
+       needs no CP-side patch.  Poll it every third frame: a frame is 11 KiB
+       spread over three DMAs, cheap enough but not free. */
+    if ((tick % 3) == 0) {
+        static int logged;
+        int ok = canvas_cp_read_opd(&g_opd_frame, SCOPE_GAMMA_REC709, 1);
+
+        g_opd_ok = ok && g_opd_frame.valid;
+        if (!logged) {
+            logged = 1;
+            hlog("HOST a7c2: opd read=%d valid=%d %ux%u",
+                 ok, g_opd_ok, (unsigned)g_opd_frame.cols,
+                 (unsigned)g_opd_frame.rows);
+        }
+    }
 
     switch (g_view % HOST_VIEW_COUNT) {
     case 0:
-        for (x = 0; x < HOST_W; ++x) {
-            int phase = (x * 2 + tick * 6) % 240;
-            int y = phase < 120 ? phase : 240 - phase;
+        if (g_opd_ok && g_opd_frame.cols > 0u) {
+            unsigned cols = g_opd_frame.cols;
+            int span = HOST_W / (int)cols;
 
-            pilot_canvas_fill_rect_v1(c, x, 20 + y, 1, 2, 0xFF40E0A0u,
-                                      PILOT_CANVAS_BLEND_NONE);
+            if (span < 2)
+                span = 2;
+            for (x = 0; x < (int)cols; ++x) {
+                int y = g_opd_frame.y[0][x];
+                int py = 24 + (255 - y) * (HOST_H - 52) / 255;
+
+                pilot_canvas_fill_rect_v1(c, x * span, py, span, 2,
+                                          0xFF40E0A0u,
+                                          PILOT_CANVAS_BLEND_NONE);
+            }
+        } else {
+            for (x = 0; x < HOST_W; ++x) {
+                int phase = (x * 2 + tick * 6) % 240;
+                int y = phase < 120 ? phase : 240 - phase;
+
+                pilot_canvas_fill_rect_v1(c, x, 20 + y, 1, 2, 0xFF40E0A0u,
+                                          PILOT_CANVAS_BLEND_NONE);
+            }
         }
         break;
     case 1:
@@ -481,6 +542,69 @@ static void host_install_touch_hook(void)
          (void *)g_widget_set_local_pos);
 }
 
+/* ---- screen tracking -------------------------------------------------- */
+
+/* presenter_controller_manager::open_screen(this, target, from, restore,
+   bool, bool) is only reachable through its vtable slot at 0x05B0C498, so
+   swapping that slot sees every screen switch.  The page-table getters tried
+   first only fire while screens are being built, which is why they never
+   reported a menu opening. */
+#define APPFW_VT_OPEN_SCREEN_OFF 0x05B0C498ull
+
+typedef void (*fn_open_screen)(void *self, const int *target, const int *from,
+                               const int *restore, int a5, int a6);
+
+static fn_open_screen g_orig_open_screen;
+
+static int host_write_mem(uintptr_t addr, const void *src, size_t len)
+{
+    long page = sysconf(_SC_PAGESIZE);
+    uintptr_t start;
+    uintptr_t end;
+    int st;
+
+    if (page <= 0)
+        return -1;
+    start = addr & ~(uintptr_t)(page - 1);
+    end = (addr + len + (uintptr_t)page - 1u) & ~(uintptr_t)(page - 1);
+    if (mprotect((void *)start, (size_t)(end - start),
+                 PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+        return -1;
+    memcpy((void *)addr, src, len);
+    __builtin___clear_cache((char *)addr, (char *)addr + len);
+    st = mprotect((void *)start, (size_t)(end - start), PROT_READ);
+    return st == 0 ? 0 : -1;
+}
+
+static void host_open_screen(void *self, const int *target, const int *from,
+                             const int *restore, int a5, int a6)
+{
+    if (target != NULL && (unsigned int)*target != g_last_screen) {
+        g_last_screen = (unsigned int)*target;
+        hlog("HOST a7c2: screen %#x active (from %#x)", (unsigned)*target,
+             from != NULL ? (unsigned)*from : 0u);
+    }
+    g_orig_open_screen(self, target, from, restore, a5, a6);
+}
+
+static void host_install_screen_hooks(void)
+{
+    uintptr_t slot = g_host_base + APPFW_VT_OPEN_SCREEN_OFF;
+    void *cur = NULL;
+    void *replacement = (void *)host_open_screen;
+
+    if (host_read_mem(slot, &cur, sizeof(cur)) != 0) {
+        hlog("HOST a7c2: open_screen slot read failed");
+        return;
+    }
+    g_orig_open_screen = (fn_open_screen)cur;
+    if (host_write_mem(slot, &replacement, sizeof(replacement)) != 0) {
+        hlog("HOST a7c2: open_screen slot patch failed");
+        return;
+    }
+    hlog("HOST a7c2: open_screen hooked, original=%p", cur);
+}
+
 void pilot_canvas_a7c2_host_run(void)
 {
     PilotCanvas *c;
@@ -496,6 +620,7 @@ void pilot_canvas_a7c2_host_run(void)
     if (!host_create_widget())
         return;
     host_install_touch_hook();
+    host_install_screen_hooks();
 
     c = pilot_canvas_create_v1(HOST_W, HOST_H, PILOT_CANVAS_BACKEND_RECT);
     if (c == NULL) {

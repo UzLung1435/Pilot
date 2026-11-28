@@ -44,6 +44,8 @@ def main() -> int:
                         help="stock cpapp-b.bin of ILCE-7CM2 2.01")
     parser.add_argument("--out", required=True, type=pathlib.Path,
                         help="where to write the cp.patch JSON")
+    parser.add_argument("--image-out", type=pathlib.Path, default=None,
+                        help="also write the fully patched cpapp-b.bin here")
     args = parser.parse_args()
 
     image = bytearray(args.cpapp.read_bytes())
@@ -82,6 +84,8 @@ def main() -> int:
     }
 
     args.out.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
+    if args.image_out is not None:
+        args.image_out.write_bytes(image)
     print(f"hook   {HOOK_VA:#010x} {HOOK_BEFORE.hex()} -> {branch.hex()}")
     print(f"cave   {CAVE_VA:#010x} {len(patch)} bytes")
     print(f"sha256 {original_sha}")
