@@ -153,12 +153,86 @@ static void probe_symbols(void)
     log_msg("== symbol probe done, missing=%d ==", missing);
 }
 
+static unsigned char g_widget_buf[16384] __attribute__((aligned(16)));
+static unsigned char g_sprite_buf[2048] __attribute__((aligned(16)));
+
+/* v3：把 sprite 挂到 widget、挂到层、画满竖条，验证屏幕是否出现内容。 */
+static void probe_widget_paint(void *layer, uint32_t id)
+{
+    fn_widget_ctor widget_ctor;
+    fn_widget_set_size set_size;
+    fn_widget_set_layer_id set_layer_id;
+    fn_widget_init_sprite init_sprite;
+    fn_sprite_ctor sprite_ctor;
+    fn_sprite_set_rect_color set_color;
+    fn_sprite_set_rect_pos set_pos;
+    fn_sprite_set_rect_size set_size_rect;
+    fn_sprite_set_cur_rect_num set_count;
+    void *widget = g_widget_buf;
+    void *sprite = g_sprite_buf;
+    int i;
+
+    (void)layer;   /* 层的配置已在 probe_layer_detail 里做完 */
+
+    widget_ctor = (fn_widget_ctor)dlsym(RTLD_DEFAULT, "_ZN2ux6wgtsys6WidgetC2Ev");
+    set_size = (fn_widget_set_size)dlsym(RTLD_DEFAULT, "_ZN2ux6wgtsys6Widget7setSizeEff");
+    set_layer_id = (fn_widget_set_layer_id)dlsym(
+        RTLD_DEFAULT, "_ZN2ux6wgtsys6Widget10setLayerIDERKNS_4core2IDE");
+    init_sprite = (fn_widget_init_sprite)dlsym(
+        RTLD_DEFAULT, "_ZN2ux6wgtsys6Widget10initSpriteERNS_6gfxeng6SpriteEt");
+    sprite_ctor = (fn_sprite_ctor)dlsym(RTLD_DEFAULT, "_ZN2ux6gfxeng6SpriteC1Ev");
+    set_color = (fn_sprite_set_rect_color)dlsym(
+        RTLD_DEFAULT, "_ZN2ux6gfxeng6Sprite12setRectColorEtRKN6stella6CColorE");
+    set_pos = (fn_sprite_set_rect_pos)dlsym(
+        RTLD_DEFAULT, "_ZN2ux6gfxeng6Sprite10setRectPosEtRKNS_4core7Vector2E");
+    set_size_rect = (fn_sprite_set_rect_size)dlsym(
+        RTLD_DEFAULT, "_ZN2ux6gfxeng6Sprite11setRectSizeEtff");
+    set_count = (fn_sprite_set_cur_rect_num)dlsym(
+        RTLD_DEFAULT, "_ZN2ux6gfxeng6Sprite13setCurRectNumEt");
+
+    if (!widget_ctor || !set_size || !set_layer_id || !init_sprite ||
+        !sprite_ctor || !set_color || !set_pos || !set_size_rect || !set_count) {
+        log_msg("paint: missing callable, skip");
+        return;
+    }
+
+    memset(widget, 0, sizeof(g_widget_buf));
+    widget_ctor(widget);
+    log_msg("paint: widget=%p vptr=%p", widget, *(void **)widget);
+
+    set_size(widget, 640.0f, 360.0f);
+    log_msg("paint: setSize ok");
+    set_layer_id(widget, &id);
+    log_msg("paint: setLayerID ok");
+
+    memset(sprite, 0, sizeof(g_sprite_buf));
+    sprite_ctor(sprite);
+    log_msg("paint: sprite=%p vptr=%p", sprite, *(void **)sprite);
+
+    init_sprite(widget, sprite, 64);
+    log_msg("paint: initSprite(64) ok");
+
+    for (i = 0; i < 64; ++i) {
+        float pos[2] = { (float)(i * 10), 0.0f };
+        unsigned char color[4] = {
+            (unsigned char)(i * 4), (unsigned char)(255 - i * 4),
+            (unsigned char)(i * 2), 255u
+        };
+        set_pos(sprite, (unsigned short)i, pos);
+        set_size_rect(sprite, (unsigned short)i, 6.0f, 360.0f);
+        set_color(sprite, (unsigned short)i, color);
+    }
+    log_msg("paint: 64 rects filled");
+    set_count(sprite, 64);
+    log_msg("paint: setCurRectNum(64) ok, done");
+}
+
 static void probe_layer_detail(void *layer, uint32_t id)
 {
     void **vt;
     int i;
     fn_widget_ctor widget_ctor;
-    static unsigned char widget_buf[8192] __attribute__((aligned(16)));
+    
 
     vt = *(void ***)layer;
     if (vt == 0) {
@@ -190,10 +264,12 @@ static void probe_layer_detail(void *layer, uint32_t id)
         log_msg("layer detail: Widget ctor missing");
         return;
     }
-    memset(widget_buf, 0, sizeof(widget_buf));
-    log_msg("layer detail: calling Widget ctor, buf=%p", (void *)widget_buf);
-    widget_ctor(widget_buf);
-    log_msg("layer detail: widget vptr=%p", *(void **)widget_buf);
+    memset(g_widget_buf, 0, sizeof(g_widget_buf));
+    log_msg("layer detail: calling Widget ctor, buf=%p", (void *)g_widget_buf);
+    widget_ctor(g_widget_buf);
+    log_msg("layer detail: widget vptr=%p", *(void **)g_widget_buf);
+
+    probe_widget_paint(layer, id);
 }
 
 static void probe_create_layer(void)
